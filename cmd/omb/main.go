@@ -50,6 +50,7 @@ func main() {
 		bind    = flag.String("bind", "", "bind address (default: config, else 127.0.0.1)")
 		open    = flag.Bool("open", true, "open the UI in the default browser")
 		dataDir = flag.String("data", "", "data directory (default ~/.openmausbot-go)")
+		token   = flag.String("token", "", "API auth token (default: $OMB_TOKEN, else auto-generated)")
 		showVer = flag.Bool("version", false, "print the version and exit")
 		lowRAM  = flag.Bool("low-mem", true, "tune the Go GC for a 4 GB laptop")
 	)
@@ -94,6 +95,17 @@ func main() {
 	srv := server.New(cfg, provs, st, mgr, cfg.BindAddr, cfg.Port)
 	server.Version = version
 
+	authToken := strings.TrimSpace(*token)
+	autoToken := false
+	if authToken == "" {
+		authToken = strings.TrimSpace(os.Getenv("OMB_TOKEN"))
+	}
+	if authToken == "" {
+		authToken = server.GenerateToken()
+		autoToken = true
+	}
+	srv.SetAuthToken(authToken)
+
 	// Fail fast with a readable message instead of a bare "address in use".
 	if ln, err := net.Listen("tcp", net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.Port))); err != nil {
 		log.Fatalf("port %d tidak bisa dipakai: %v\nCoba: omb --port %d", cfg.Port, err, cfg.Port+1)
@@ -104,11 +116,16 @@ func main() {
 	url := srv.URL()
 	fmt.Printf("\n  🐭 OpenMausBot (Go %s) — %s\n", version, url)
 	fmt.Printf("  data: %s\n", config.DataDir())
+	if autoToken {
+		fmt.Printf("  auth: %s\n", srv.LoginURL())
+	} else {
+		fmt.Printf("  auth: aktif (memakai --token / $OMB_TOKEN)\n")
+	}
 	fmt.Printf("  RAM budget: 192 MB heap cap, %d workers\n", runtime.NumCPU())
 	fmt.Printf("  Ctrl-C untuk berhenti\n\n")
 
 	if *open {
-		go openBrowser(url)
+		go openBrowser(srv.LoginURL())
 	}
 
 	errCh := make(chan error, 1)
@@ -136,6 +153,7 @@ func usage() {
 
   omb                         jalankan server + UI (default 127.0.0.1:8799)
   omb --port 9000 --bind 0.0.0.0
+  omb --token SECRET          set token akses API (atau env OMB_TOKEN; default acak)
   omb --open=false            headless (server/VPS)
   omb --data DIR              pindahkan folder data
 

@@ -290,6 +290,18 @@
   </form>
 </dialog>
 
+<dialog id="authDlg">
+  <form id="authForm">
+    <div class="dlg-head"><span>🔒 Token akses OpenMausBot</span></div>
+    <div class="dlg-body">
+      <div class="hint">Server membutuhkan token akses (lihat baris <code>auth:</code> di terminal saat menjalankan <code>omb</code>, atau nilai <code>--token</code> / <code>OMB_TOKEN</code>).</div>
+      <label class="field">Token akses<input id="authToken" type="password" placeholder="Tempel token akses…" autocomplete="current-password" required></label>
+      <div id="authErr" class="bad-txt" style="display:none"></div>
+    </div>
+    <div class="dlg-foot"><button class="btn primary" type="submit">Masuk</button></div>
+  </form>
+</dialog>
+
 <div class="ctx" id="ctx" role="menu"></div>
 <div class="toast" id="toast"></div>
 
@@ -319,7 +331,12 @@
     const txt = await res.text();
     let data = null;
     try { data = txt ? JSON.parse(txt) : null; } catch { data = {raw:txt}; }
-    if(!res.ok) throw new Error((data && data.error) || ("HTTP "+res.status));
+    if(!res.ok){
+      const err = new Error((data && data.error) || ("HTTP "+res.status));
+      err.status = res.status;
+      if(res.status === 401 && path !== "/api/auth") showAuth();
+      throw err;
+    }
     return data;
   }
   function toast(msg){ const t=$("#toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2200); }
@@ -535,6 +552,7 @@
       if(e.type==="state"){ loadState(); }
     };
     es.onerror = ()=>{ /* EventSource reconnects on its own */ };
+    return es;
   }
 
   // ---------- context menu ----------
@@ -925,9 +943,40 @@
     }catch(e){ toast(e.message); }
   };
 
+  // ---------- auth ----------
+  const authDlg = $("#authDlg");
+  let sseConn = null;
+  function showAuth(){
+    if(authDlg && !authDlg.open){
+      $("#authErr").style.display = "none";
+      authDlg.showModal();
+    }
+  }
+  $("#authForm").onsubmit = async (ev)=>{
+    ev.preventDefault();
+    const token = $("#authToken").value.trim();
+    const errBox = $("#authErr");
+    if(!token){ errBox.textContent = "Token wajib diisi"; errBox.style.display = "block"; return; }
+    try{
+      await api("/api/auth", {method:"POST", body:JSON.stringify({token})});
+      $("#authToken").value = "";
+      errBox.style.display = "none";
+      authDlg.close();
+      await loadState();
+      if(!sseConn) sseConn = connect();
+    }catch(e){
+      errBox.textContent = e.message;
+      errBox.style.display = "block";
+    }
+  };
+
   // ---------- boot ----------
-  loadState().catch(e=>{ el.bots.innerHTML = `<div class="bot-prev" style="padding:14px;color:var(--err)">${esc(e.message)}</div>`; });
-  connect();
+  loadState()
+    .then(()=>{ if(!sseConn) sseConn = connect(); })
+    .catch(e=>{
+      if(e.status === 401){ showAuth(); return; }
+      el.bots.innerHTML = `<div class="bot-prev" style="padding:14px;color:var(--err)">${esc(e.message)}</div>`;
+    });
 })();
 </script>
 </body>
