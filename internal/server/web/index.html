@@ -660,13 +660,25 @@
       return;
     }
     const e = state.engines.find(x=>x.id===id);
-    dl.innerHTML = "";
+    const cliModels = {
+      claude: ["sonnet", "opus", "haiku"],
+      codex: ["o4-mini", "gpt-4.1"],
+      grok: ["grok-4", "grok-3"],
+      "gemini-cli": ["gemini-2.5-flash", "gemini-2.5-pro"],
+      opencode: ["opencode/big-pickle", "google/gemini-2.5-flash", "ollama/llama3.2"],
+      echo: ["demo"],
+    };
+    const mi = $("#modelInput");
+    if(!preserveModel && mi.value.trim().toLowerCase()==="demo" && id!=="echo"){
+      mi.value = "";
+    }
+    dl.innerHTML = (cliModels[id]||[]).map(m=>`<option value="${esc(m)}">`).join("");
     const map = {
       claude:"Butuh CLI `claude` (Claude Code) sudah login.",
       codex:"Butuh CLI `codex` (OpenAI Codex) sudah login.",
       grok:"Butuh CLI `grok` (xAI) sudah login.",
       "gemini-cli":"Butuh CLI `gemini` (Gemini CLI) sudah login Google (punya tier gratis) atau set GEMINI_API_KEY.",
-      opencode:"Butuh CLI `opencode` (OpenCode CLI) sudah terpasang (mendukung model gratis Zen / provider lokal).",
+      opencode:"Butuh CLI `opencode` (OpenCode CLI) sudah terpasang (mendukung model gratis Zen / provider lokal). Kosongkan Model untuk pakai default OpenCode.",
       echo:"Demo offline: tidak butuh CLI/key, bagus untuk mencoba UI."
     };
     $("#engineHint").textContent = (map[id] || (e? e.name : "")) + " Kalau CLI tidak ada, bot menampilkan pesan error yang jelas, bukan crash.";
