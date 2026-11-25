@@ -57,11 +57,14 @@ def _jupiter_quote_usd(mint: str, usd_size: float) -> float | None:
         return None
 
 
-def can_enter(book: dict[str, Any], mint: str) -> tuple[bool, str]:
+def can_enter(book: dict[str, Any], mint: str, symbol: str = "") -> tuple[bool, str]:
     if config.STOP_FILE.exists():
         return False, "STOP file active"
     if mint in book.get("open", {}):
         return False, "already holding token"
+    sym_norm = symbol.strip().upper()
+    if sym_norm and any(str(p.get("symbol") or "").strip().upper() == sym_norm for p in book.get("open", {}).values()):
+        return False, f"already holding ${sym_norm}"
     if len(book.get("open", {})) >= config.MAX_OPEN_POSITIONS:
         return False, f"max open ({config.MAX_OPEN_POSITIONS}) reached"
     eq = equity_of(book)
@@ -148,7 +151,8 @@ def execute_entry(
     mode: str = "demo",
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Buka posisi baru: paper mode (Tahap 1) atau live on-chain jika double-lock aktif (Tahap 3)."""
-    ok, reason = can_enter(book, mint)
+    sym = str(facts.get("symbol") or mint[:6])
+    ok, reason = can_enter(book, mint, symbol=sym)
     if not ok:
         return False, reason, None
 

@@ -36,6 +36,12 @@ def _trail_stop_for(peak_pct: float, current_stop: float) -> float:
     for peak_gate, new_stop in config.TRAIL_LEVELS:
         if peak_pct >= peak_gate and new_stop > floor:
             floor = new_stop
+    # Above +120% peak, keep trailing 25% below the peak so extended runners lock in profit
+    # instead of freezing forever at +80%.
+    if peak_pct >= 120.0:
+        dyn = round(peak_pct * 0.75, 1)
+        if dyn > floor:
+            floor = dyn
     return floor
 
 
@@ -96,8 +102,12 @@ def monitor_positions(
             if px is not None:
                 last = px
         else:
-            # Simulasi pergerakan harga di mode demo offline
-            step = r.uniform(-0.075, 0.095)
+            # Simulasi pergerakan harga realistis di mode demo offline (tanpa drift positif tak terbatas)
+            gain_so_far = ((last - entry) / entry) * 100.0 if entry > 0 else 0.0
+            if gain_so_far > 150.0:
+                step = r.uniform(-0.090, 0.050)
+            else:
+                step = r.uniform(-0.064, 0.066)
             last = max(0.000001, round(last * (1.0 + step), 6))
 
         pos["last_price"] = last
