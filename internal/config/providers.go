@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,12 +38,36 @@ type Provider struct {
 // (e.g. "$OPENAI_API_KEY") rather than the key itself.
 func (p Provider) IsEnvKey() bool { return strings.HasPrefix(p.APIKey, "$") }
 
+// IsLocalURL reports whether rawURL points to a loopback/unspecified local host.
+func IsLocalURL(rawURL string) bool {
+	s := strings.TrimSpace(rawURL)
+	if s == "" {
+		return false
+	}
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return false
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
+	return false
+}
+
 // HasKeyNeeded reports whether this provider needs a credential to work.
 // A local endpoint (Ollama and friends) does not.
 func (p Provider) HasKeyNeeded() bool {
-	base := strings.ToLower(p.BaseURL)
-	return !(strings.Contains(base, "127.0.0.1") || strings.Contains(base, "localhost") ||
-		strings.Contains(base, "0.0.0.0") || strings.HasPrefix(base, "http://"))
+	return !IsLocalURL(p.BaseURL)
 }
 
 // MaskedProvider is the only shape that may cross the HTTP boundary.
@@ -107,6 +133,10 @@ func LoadProviders() (*Providers, error) {
 func (p *Providers) Save() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.saveLocked()
+}
+
+func (p *Providers) saveLocked() error {
 	raw, err := json.MarshalIndent(p.list, "", "  ")
 	if err != nil {
 		return err
@@ -121,12 +151,15 @@ func (p *Providers) Save() error {
 	return os.Rename(tmp, p.path)
 }
 
-// mergeSeedModels adds model names that newer builds know about to providers the
-// person has not touched. Keys and default models are never modified.
+// mergeSeedModels adds model names that newer builds know about to providers
+// still using a seed list. Keys and default models are never modified.
 func (p *Providers) mergeSeedModels() {
 	seeds := seedProviders()
 	changed := false
 	for i := range p.list {
+		if p.list[i].ModelsSource == "live" || p.list[i].ModelsSource == "custom" {
+			continue
+		}
 		for _, seed := range seeds {
 			if seed.ID != p.list[i].ID {
 				continue
@@ -134,11 +167,6 @@ func (p *Providers) mergeSeedModels() {
 			have := map[string]bool{}
 			for _, m := range p.list[i].Models {
 				have[m] = true
-			}
-			// Only extend an untouched model list: if the person curated their
-			// own, leave it alone.
-			if len(p.list[i].Models) > 0 && len(p.list[i].Models) != len(seed.Models) {
-				continue
 			}
 			for _, m := range seed.Models {
 				if !have[m] {
@@ -158,6 +186,7 @@ func (p *Providers) mergeSeedModels() {
 // stored key. It returns the names it brought back.
 func (p *Providers) RestoreDefaults() []string {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	have := map[string]bool{}
 	for _, pr := range p.list {
 		have[pr.ID] = true
@@ -170,8 +199,9 @@ func (p *Providers) RestoreDefaults() []string {
 		p.list = append(p.list, seed)
 		restored = append(restored, seed.Name)
 	}
-	p.mu.Unlock()
-	_ = p.Save()
+	if len(restored) > 0 {
+		_ = p.saveLocked()
+	}
 	return restored
 }
 
@@ -271,6 +301,7 @@ func (p *Providers) ByID(id string) (Provider, bool) {
 // Upsert stores or replaces a provider and saves.
 func (p *Providers) Upsert(pr Provider) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	replaced := false
 	for i := range p.list {
 		if p.list[i].ID == pr.ID {
@@ -282,21 +313,45 @@ func (p *Providers) Upsert(pr Provider) error {
 	if !replaced {
 		p.list = append(p.list, pr)
 	}
-	p.mu.Unlock()
-	return p.Save()
+	return p.saveLocked()
+}
+
+// Update atomically reads, transforms, and saves a provider by id.
+// If fn returns an error, nothing is saved and the error is returned.
+func (p *Providers) Update(id string, fn func(*Provider) error) (Provider, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.list {
+		if p.list[i].ID != id {
+			continue
+		}
+		cand := p.list[i]
+		if len(cand.Models) > 0 {
+			cand.Models = append([]string{}, cand.Models...)
+		}
+		if err := fn(&cand); err != nil {
+			return Provider{}, true, err
+		}
+		p.list[i] = cand
+		if err := p.saveLocked(); err != nil {
+			return Provider{}, true, err
+		}
+		return cand, true, nil
+	}
+	return Provider{}, false, nil
 }
 
 // Delete removes a provider by id.
 func (p *Providers) Delete(id string) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	for i := range p.list {
 		if p.list[i].ID == id {
 			p.list = append(p.list[:i], p.list[i+1:]...)
 			break
 		}
 	}
-	p.mu.Unlock()
-	return p.Save()
+	return p.saveLocked()
 }
 
 // Secret resolves the key to send on the wire: a literal key, or the value of

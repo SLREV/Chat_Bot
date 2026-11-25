@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/milind-soni/openmausbot-go/internal/config"
 	"github.com/milind-soni/openmausbot-go/internal/provider"
 )
+
+var errBadInput = errors.New("bad input")
 
 // providerInput is what the UI may send. A key field that is absent or empty
 // means "keep the stored one", so editing a model never wipes a credential.
@@ -143,65 +146,73 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cur, ok := s.provs.ByID(id)
-	if !ok {
-		writeErr(w, 404, "provider tidak ditemukan")
-		return
-	}
 	var in providerInput
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, 400, "body bukan JSON yang valid")
 		return
 	}
-	notes := []string{}
-	if strings.TrimSpace(in.Name) != "" {
-		cur.Name = strings.TrimSpace(in.Name)
-	}
-	if k := strings.ToLower(strings.TrimSpace(in.Kind)); k == "openai" || k == "anthropic" {
-		cur.Kind = k
-	}
-	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
-		if !strings.HasPrefix(b, "http://") && !strings.HasPrefix(b, "https://") {
-			writeErr(w, 400, "base URL harus diawali http:// atau https://")
-			return
+	var notes []string
+	var badBaseURL bool
+	cur, ok, err := s.provs.Update(id, func(cur *config.Provider) error {
+		if strings.TrimSpace(in.Name) != "" {
+			cur.Name = strings.TrimSpace(in.Name)
 		}
-		cur.BaseURL = b
-	}
-	if in.DefaultModel != "" {
-		cur.DefaultModel = strings.TrimSpace(in.DefaultModel)
-	}
-	if in.Models != nil {
-		cur.Models = cleanModels(in.Models)
-	}
-	if in.MaxTokens != nil {
-		cur.MaxTokens = clampMaxTokens(in.MaxTokens, cur.MaxTokens)
-	}
-	if in.Fallback != nil {
-		n := *in.Fallback
-		if n < 0 {
-			n = 0
+		if k := strings.ToLower(strings.TrimSpace(in.Kind)); k == "openai" || k == "anthropic" {
+			cur.Kind = k
 		}
-		if n > 99 {
-			n = 99
+		if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
+			if !strings.HasPrefix(b, "http://") && !strings.HasPrefix(b, "https://") {
+				badBaseURL = true
+				return errBadInput
+			}
+			cur.BaseURL = b
 		}
-		cur.Fallback = n
-	}
-	if in.Enabled != nil {
-		cur.Enabled = *in.Enabled
-	}
-	if in.APIKey != nil {
-		raw := strings.TrimSpace(*in.APIKey)
-		switch {
-		case raw == "__clear__":
-			cur.APIKey = ""
-		case raw != "":
-			key, n := config.SanitizeKey(raw)
-			notes = append(notes, n...)
-			cur.APIKey = key
-			// A pasted key must not linger in the browser: nothing echoes it.
+		if in.DefaultModel != "" {
+			cur.DefaultModel = strings.TrimSpace(in.DefaultModel)
 		}
+		if in.Models != nil {
+			cur.Models = cleanModels(in.Models)
+			cur.ModelsSource = "custom"
+		}
+		if in.MaxTokens != nil {
+			cur.MaxTokens = clampMaxTokens(in.MaxTokens, cur.MaxTokens)
+		}
+		if in.Fallback != nil {
+			n := *in.Fallback
+			if n < 0 {
+				n = 0
+			}
+			if n > 99 {
+				n = 99
+			}
+			cur.Fallback = n
+		}
+		if in.Enabled != nil {
+			cur.Enabled = *in.Enabled
+		}
+		if in.APIKey != nil {
+			raw := strings.TrimSpace(*in.APIKey)
+			switch {
+			case raw == "__clear__":
+				cur.APIKey = ""
+			case raw != "":
+				key, n := config.SanitizeKey(raw)
+				notes = append(notes, n...)
+				cur.APIKey = key
+				// A pasted key must not linger in the browser: nothing echoes it.
+			}
+		}
+		return nil
+	})
+	if !ok {
+		writeErr(w, 404, "provider tidak ditemukan")
+		return
 	}
-	if err := s.provs.Upsert(cur); err != nil {
+	if badBaseURL {
+		writeErr(w, 400, "base URL harus diawali http:// atau https://")
+		return
+	}
+	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -241,27 +252,30 @@ func (s *Server) useFreeModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if in.BotID != "" {
-		for _, b := range s.cfg.Snapshot() {
-			if b.ID != in.BotID {
-				continue
-			}
+		b, ok := s.cfg.UpdateBot(in.BotID, func(b *config.Bot) {
 			b.Engine = pr.ID
 			b.Model = model
-			s.cfg.UpsertBot(b)
-			if err := s.cfg.Save(); err != nil {
-				writeErr(w, 500, err.Error())
-				return
-			}
-			s.hub.broadcast(event{Type: "state"})
-			writeJSON(w, 200, map[string]any{"ok": true, "botId": b.ID, "engine": pr.ID, "model": model})
+		})
+		if !ok {
+			writeErr(w, 404, "bot tidak ditemukan")
 			return
 		}
-		writeErr(w, 404, "bot tidak ditemukan")
+		if err := s.cfg.Save(); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		s.hub.broadcast(event{Type: "state"})
+		writeJSON(w, 200, map[string]any{"ok": true, "botId": b.ID, "engine": pr.ID, "model": model})
 		return
 	}
 
-	pr.DefaultModel = model
-	if err := s.provs.Upsert(pr); err != nil {
+	if _, ok, err := s.provs.Update(pr.ID, func(p *config.Provider) error {
+		p.DefaultModel = model
+		return nil
+	}); !ok {
+		writeErr(w, 404, "provider tidak ditemukan")
+		return
+	} else if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -270,13 +284,15 @@ func (s *Server) useFreeModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) clearProviderKey(w http.ResponseWriter, r *http.Request) {
-	pr, ok := s.provs.ByID(r.PathValue("id"))
+	pr, ok, err := s.provs.Update(r.PathValue("id"), func(p *config.Provider) error {
+		p.APIKey = ""
+		return nil
+	})
 	if !ok {
 		writeErr(w, 404, "provider tidak ditemukan")
 		return
 	}
-	pr.APIKey = ""
-	if err := s.provs.Upsert(pr); err != nil {
+	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -371,17 +387,25 @@ func (s *Server) syncProviderModels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": msg, "models": pr.Models})
 		return
 	}
-	pr.Models = models
-	pr.ModelsSource = "live"
-	if pr.DefaultModel == "" || !containsFold(models, pr.DefaultModel) {
-		pr.DefaultModel = models[0]
+	models = provider.SortForChat(models)
+	updated, ok, err := s.provs.Update(pr.ID, func(p *config.Provider) error {
+		p.Models = models
+		p.ModelsSource = "live"
+		if p.DefaultModel == "" || !containsFold(models, p.DefaultModel) {
+			p.DefaultModel = models[0]
+		}
+		return nil
+	})
+	if !ok {
+		writeErr(w, 404, "provider tidak ditemukan")
+		return
 	}
-	if err := s.provs.Upsert(pr); err != nil {
+	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	s.hub.broadcast(event{Type: "state"})
-	writeJSON(w, 200, map[string]any{"ok": true, "models": models, "count": len(models), "defaultModel": pr.DefaultModel})
+	writeJSON(w, 200, map[string]any{"ok": true, "models": updated.Models, "count": len(updated.Models), "defaultModel": updated.DefaultModel})
 }
 
 // checkModelAnswers verifies one model name against the vendor.
@@ -439,8 +463,8 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 func withNotes(m config.MaskedProvider, p config.Provider, notes []string) map[string]any {
 	out := map[string]any{
 		"id": m.ID, "name": m.Name, "kind": m.Kind, "baseUrl": m.BaseURL,
-		"defaultModel": m.DefaultModel, "models": m.Models, "maxTokens": m.MaxTokens,
-		"fallback": m.Fallback, "enabled": m.Enabled,
+		"defaultModel": m.DefaultModel, "models": m.Models, "modelsSource": m.ModelsSource,
+		"maxTokens": m.MaxTokens, "fallback": m.Fallback, "enabled": m.Enabled,
 		"hasKey": m.HasKey, "keyHint": m.KeyHint, "keyFromEnv": m.KeyFromEnv,
 	}
 	if len(notes) > 0 {

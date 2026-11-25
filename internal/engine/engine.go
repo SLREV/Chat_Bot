@@ -121,11 +121,13 @@ func Run(ctx context.Context, r Request) (Result, error) {
 		cmd.Stdin = strings.NewReader(prompt)
 	}
 	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killGroup(cmd) }
+	cmd.WaitDelay = 2 * time.Second
 
 	var (
-		mu   sync.Mutex
-		buf  bytes.Buffer
-		werr error
+		mu        sync.Mutex
+		buf       bytes.Buffer
+		stderrBuf bytes.Buffer
 	)
 	out := &lockedWriter{mu: &mu, sink: func(p []byte) {
 		buf.Write(p)
@@ -134,10 +136,20 @@ func Run(ctx context.Context, r Request) (Result, error) {
 		}
 	}}
 	cmd.Stdout = out
-	cmd.Stderr = &lockedWriter{mu: &mu, sink: func(p []byte) { werr = errors.Join(werr, errors.New(strings.TrimSpace(string(p)))) }}
+	cmd.Stderr = &lockedWriter{mu: &mu, sink: func(p []byte) {
+		const maxStderr = 4 << 10
+		if stderrBuf.Len() >= maxStderr {
+			return
+		}
+		rem := maxStderr - stderrBuf.Len()
+		if len(p) > rem {
+			p = p[:rem]
+		}
+		stderrBuf.Write(p)
+	}}
 
 	err := cmd.Run()
-	killGroup(cmd)
+	_ = killGroup(cmd)
 
 	res := Result{Text: clean(buf.String()), Millis: time.Since(start).Milliseconds()}
 
@@ -149,11 +161,8 @@ func Run(ctx context.Context, r Request) (Result, error) {
 	}
 	if err != nil {
 		msg := strings.TrimSpace(err.Error())
-		if werr != nil {
-			detail := truncate(werr.Error(), 500)
-			if detail != "" {
-				msg = detail
-			}
+		if detail := truncate(strings.TrimSpace(stderrBuf.String()), 500); detail != "" {
+			msg = detail
 		}
 		if res.Text != "" {
 			// Partial answer with a non-zero exit is common when a CLI is
@@ -189,9 +198,7 @@ func demoReply(prompt string) string {
 	if p == "" {
 		return "Halo! Saya bot demo offline. Pasang `claude`, `codex`, atau `grok` lalu pilih engine-nya di Settings untuk jawaban sungguhan."
 	}
-	if len(p) > 400 {
-		p = p[:400] + "…"
-	}
+	p = truncate(p, 400)
 	return fmt.Sprintf("Halo! Ini balasan demo (tanpa CLI terpasang), jadi saya hanya menggemakan pesanmu:\n\n> %s\n\nUntuk jawaban sungguhan: pasang salah satu CLI agent (`claude`, `codex`, `grok`), lalu di **Settings → Engine** pilih engine untuk bot ini. Mesin ini memakai ~20 MB RAM, bukan ~600 MB seperti build Electron.", p)
 }
 
@@ -199,13 +206,14 @@ func chunk(s string, n int) []string {
 	if n <= 0 {
 		return []string{s}
 	}
+	r := []rune(s)
 	var out []string
-	for len(s) > n {
-		out = append(out, s[:n])
-		s = s[n:]
+	for len(r) > n {
+		out = append(out, string(r[:n]))
+		r = r[n:]
 	}
-	if s != "" {
-		out = append(out, s)
+	if len(r) > 0 {
+		out = append(out, string(r))
 	}
 	return out
 }
@@ -232,10 +240,11 @@ func clean(s string) string {
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }
 
 func containsAny(args []string, s string) bool {

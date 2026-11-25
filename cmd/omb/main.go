@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/milind-soni/openmausbot-go/internal/agent"
 	"github.com/milind-soni/openmausbot-go/internal/config"
@@ -117,11 +119,15 @@ func main() {
 
 	select {
 	case err := <-errCh:
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server: %v", err)
 		}
 	case <-ctx.Done():
 		fmt.Println("\n  bye 👋")
+		mgr.CancelAll()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = srv.Shutdown(shutCtx)
+		cancel()
 	}
 }
 

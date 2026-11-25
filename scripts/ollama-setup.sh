@@ -137,7 +137,19 @@ if [ "$DRY_RUN" = 1 ]; then
   c_ok "semua langkah tersimulasi. Jalankan tanpa --dry-run untuk benar-benar memasang."
   exit 0
 fi
-if command -v ollama >/dev/null 2>&1 && ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$MODEL"; then
+has_model() {
+  local installed
+  installed="$(ollama list 2>/dev/null | awk 'NR>1{print $1}')"
+  if printf '%s\n' "$installed" | grep -Fxq "$MODEL"; then
+    return 0
+  fi
+  if [ "${MODEL#*:}" = "$MODEL" ] && printf '%s\n' "$installed" | grep -Fxq "${MODEL}:latest"; then
+    return 0
+  fi
+  return 1
+}
+
+if command -v ollama >/dev/null 2>&1 && has_model; then
   c_ok "$MODEL sudah ada"
 else
   run ollama pull "$MODEL" || c_warn "pull dilewati — jalankan sendiri: ollama pull $MODEL"

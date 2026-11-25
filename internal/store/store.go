@@ -137,27 +137,38 @@ func (s *Store) Append(m Message) (Message, error) {
 	if m.TS.IsZero() {
 		m.TS = time.Now()
 	}
-	f, err := os.OpenFile(s.Path(m.Thread), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return m, err
-	}
 	raw, err := json.Marshal(m)
-	if err == nil {
-		_, err = f.Write(append(raw, '\n'))
-	}
-	cerr := f.Close()
 	if err != nil {
 		return m, err
-	}
-	if cerr != nil {
-		return m, cerr
 	}
 
 	s.mu.Lock()
+	f, err := os.OpenFile(s.Path(m.Thread), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		s.mu.Unlock()
+		return m, err
+	}
+	_, err = f.Write(append(raw, '\n'))
+	cerr := f.Close()
+	if err != nil {
+		s.mu.Unlock()
+		return m, err
+	}
+	if cerr != nil {
+		s.mu.Unlock()
+		return m, cerr
+	}
+
 	r := s.rings[m.Thread]
 	if r == nil {
-		r = &ring{}
+		if msgs, terr := tailLines(s.Path(m.Thread), ringSize); terr == nil && len(msgs) > 0 {
+			r = &ring{msgs: msgs}
+		} else {
+			r = &ring{msgs: []Message{m}}
+		}
 		s.rings[m.Thread] = r
+	} else {
+		r.add(m)
 	}
 	t := s.meta[m.Thread]
 	t.BotID = m.Thread
@@ -167,7 +178,6 @@ func (s *Store) Append(m Message) (Message, error) {
 	s.meta[m.Thread] = t
 	s.mu.Unlock()
 
-	r.add(m)
 	s.publish(m)
 	return m, nil
 }
@@ -177,8 +187,9 @@ func oneLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if len(s) > 120 {
-		s = s[:117] + "…"
+	r := []rune(s)
+	if len(r) > 120 {
+		return string(r[:117]) + "…"
 	}
 	return s
 }
@@ -187,17 +198,18 @@ func oneLine(s string) string {
 func (s *Store) Recent(botID string) []Message {
 	s.mu.Lock()
 	r := s.rings[botID]
-	s.mu.Unlock()
 	if r != nil {
+		s.mu.Unlock()
 		return r.list()
 	}
-	// First touch: read the tail of the file and populate the ring.
+	// First touch: read the tail of the file under lock so concurrent Appends
+	// cannot race with ring population.
 	msgs, err := tailLines(s.Path(botID), ringSize)
 	if err != nil {
+		s.mu.Unlock()
 		return nil
 	}
 	nr := &ring{msgs: msgs}
-	s.mu.Lock()
 	s.rings[botID] = nr
 	s.mu.Unlock()
 	return nr.list()
@@ -209,7 +221,14 @@ func (s *Store) History(botID string, limit, offset int) ([]Message, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	all, err := tailLines(s.Path(botID), limit+offset)
+	if offset < 0 {
+		offset = 0
+	}
+	want := limit + offset
+	if want < limit {
+		want = limit
+	}
+	all, err := tailLines(s.Path(botID), want)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return []Message{}, nil
@@ -255,7 +274,10 @@ func (s *Store) Clear(botID string) error {
 	delete(s.rings, botID)
 	s.mu.Unlock()
 	_ = os.Remove(s.metaPath(botID))
-	return os.Remove(s.Path(botID))
+	if err := os.Remove(s.Path(botID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Subscribe returns a channel of live messages plus a cancel func.
@@ -306,43 +328,85 @@ func (s *Store) loadIndex() {
 // tailLines reads at most n trailing JSON lines from a file without loading
 // whole large files into memory.
 func tailLines(path string, n int) ([]Message, error) {
+	if n <= 0 {
+		return []Message{}, nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	// Read the file backwards in 32 KiB chunks until we have n newlines or hit
-	// the start of the file.
+	// Read the file backwards in 32 KiB chunks until we have enough valid
+	// messages or hit the start of the file.
 	const chunk = 32 << 10
 	stat, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	size := stat.Size()
-	var buf []byte
-	pos := size
-	newlines := 0
-	for pos > 0 && newlines <= n {
-		step := int64(chunk)
-		if pos-step < 0 {
-			step = pos
-		}
-		pos -= step
-		block := make([]byte, step)
-		if _, err := f.ReadAt(block, pos); err != nil {
-			return nil, err
-		}
-		buf = append(block, buf...)
-		newlines = strings.Count(string(buf), "\n")
+	pos := stat.Size()
+	if pos == 0 {
+		return []Message{}, nil
 	}
 
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	var chunks [][]byte
+	totalBytes := 0
+	newlines := 0
+	target := n + 1
+
+	for pos > 0 {
+		for pos > 0 && newlines <= target {
+			step := int64(chunk)
+			if pos-step < 0 {
+				step = pos
+			}
+			pos -= step
+			block := make([]byte, step)
+			if _, err := f.ReadAt(block, pos); err != nil {
+				return nil, err
+			}
+			chunks = append(chunks, block)
+			totalBytes += len(block)
+			for _, b := range block {
+				if b == '\n' {
+					newlines++
+				}
+			}
+		}
+
+		out := parseTailChunks(chunks, totalBytes, pos > 0)
+		if len(out) >= n || pos == 0 {
+			if len(out) > n {
+				out = out[len(out)-n:]
+			}
+			return out, nil
+		}
+		// Blank or torn lines meant fewer than n valid messages; read more.
+		target += (n - len(out)) + 4
 	}
-	out := make([]Message, 0, len(lines))
-	sc := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
+
+	out := parseTailChunks(chunks, totalBytes, false)
+	if len(out) > n {
+		out = out[len(out)-n:]
+	}
+	return out, nil
+}
+
+func parseTailChunks(chunks [][]byte, totalBytes int, dropPartialFirstLine bool) []Message {
+	buf := make([]byte, 0, totalBytes)
+	for i := len(chunks) - 1; i >= 0; i-- {
+		buf = append(buf, chunks[i]...)
+	}
+	s := string(buf)
+	if dropPartialFirstLine {
+		if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+			s = s[idx+1:]
+		} else {
+			return nil
+		}
+	}
+	out := []Message{}
+	sc := bufio.NewScanner(strings.NewReader(s))
 	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -355,5 +419,5 @@ func tailLines(path string, n int) ([]Message, error) {
 		}
 		out = append(out, m)
 	}
-	return out, nil
+	return out
 }

@@ -60,9 +60,6 @@ func SanitizeKey(raw string) (key string, notes []string) {
 		key = key[:i]
 		notes = append(notes, "spasi/baris baru di ujung dibuang")
 	}
-	if strings.Contains(raw, "\n") || strings.Contains(raw, "\r") {
-		notes = append(notes, "")
-	}
 	return key, compact(notes)
 }
 
