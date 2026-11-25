@@ -231,6 +231,26 @@ class DeskTestCase(unittest.TestCase):
         saved = json.loads(config.STATE_FILE.read_text(encoding="utf-8"))
         self.assertEqual(set(saved["agents"].keys()), {"scout", "filter", "analyst", "executor", "risk", "logger"})
 
+    def test_dotenv_loader_parses_values_without_overriding_env(self) -> None:
+        env_path = Path(self.tmp.name) / ".env"
+        env_path.write_text(
+            "# komentar\n"
+            "DESK_TEST_A=hello # inline comment\n"
+            'DESK_TEST_B="quoted value"\n'
+            "export DESK_TEST_C='single_quoted'\n"
+            "DESK_TEST_EXISTING=from_file\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"DESK_TEST_EXISTING": "from_terminal"}, clear=False):
+            for k in ("DESK_TEST_A", "DESK_TEST_B", "DESK_TEST_C"):
+                os.environ.pop(k, None)
+            loaded = config.load_dotenv_file(env_path)
+            self.assertTrue(loaded)
+            self.assertEqual(os.environ.get("DESK_TEST_A"), "hello")
+            self.assertEqual(os.environ.get("DESK_TEST_B"), "quoted value")
+            self.assertEqual(os.environ.get("DESK_TEST_C"), "single_quoted")
+            self.assertEqual(os.environ.get("DESK_TEST_EXISTING"), "from_terminal")
+
     def test_stage2_dry_run_simulate_transaction_without_private_key(self) -> None:
         with mock.patch.object(wallet, "fetch_json", return_value={"inAmount": "2000000", "outAmount": "5000000", "priceImpactPct": "0.12"}):
             with mock.patch.object(

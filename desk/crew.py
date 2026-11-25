@@ -106,6 +106,7 @@ def doctor_report() -> dict[str, Any]:
     solders_ok = wallet.has_solders()
     key_ok = bool(os.environ.get("SOLANA_PRIVATE_KEY", "").strip())
     return {
+        "env_files_loaded": list(config.LOADED_ENV_FILES),
         "stage1_paper_live_feed": True,
         "stage2_rpc_configured": rpc_ok,
         "stage3_solders_installed": solders_ok,
