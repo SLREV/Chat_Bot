@@ -412,7 +412,12 @@ func (s *Server) createBot(w http.ResponseWriter, r *http.Request) {
 		in.Engine = "echo"
 	}
 	if in.Model == "" {
-		in.Model = "sonnet"
+		switch in.Engine {
+		case "claude":
+			in.Model = "sonnet"
+		case "echo":
+			in.Model = "demo"
+		}
 	}
 	if in.Emoji == "" {
 		in.Emoji = "🤖"
@@ -435,41 +440,56 @@ func (s *Server) createBot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateBot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var patch config.Bot
+	var patch struct {
+		Name        *string `json:"name"`
+		Emoji       *string `json:"emoji"`
+		Avatar      *string `json:"avatar"`
+		Color       *string `json:"color"`
+		Engine      *string `json:"engine"`
+		Model       *string `json:"model"`
+		Personality *string `json:"personality"`
+		Workdir     *string `json:"workdir"`
+	}
 	if err := readJSON(r, &patch); err != nil {
 		writeErr(w, 400, "body bukan JSON yang valid")
 		return
 	}
 	found, ok := s.cfg.UpdateBot(id, func(b *config.Bot) {
-		if patch.Name != "" {
-			b.Name = patch.Name
+		if patch.Name != nil && *patch.Name != "" {
+			b.Name = *patch.Name
 		}
-		if patch.Emoji != "" {
-			b.Emoji = patch.Emoji
+		if patch.Emoji != nil && *patch.Emoji != "" {
+			b.Emoji = *patch.Emoji
 		}
 		// Avatar may be cleared on purpose, so an explicit "__none__" is honoured.
-		switch patch.Avatar {
-		case "":
-			// leave unchanged
-		case "__none__":
-			b.Avatar = ""
-		default:
-			b.Avatar = patch.Avatar
+		if patch.Avatar != nil {
+			switch *patch.Avatar {
+			case "":
+				// leave unchanged
+			case "__none__":
+				b.Avatar = ""
+			default:
+				b.Avatar = *patch.Avatar
+			}
 		}
-		if patch.Color != "" {
-			b.Color = patch.Color
+		if patch.Color != nil && *patch.Color != "" {
+			b.Color = *patch.Color
 		}
-		if patch.Engine != "" {
-			b.Engine = patch.Engine
+		if patch.Engine != nil && *patch.Engine != "" {
+			b.Engine = *patch.Engine
 		}
-		if patch.Model != "" {
-			b.Model = patch.Model
+		if patch.Model != nil {
+			if *patch.Model == "__none__" {
+				b.Model = ""
+			} else {
+				b.Model = *patch.Model
+			}
 		}
-		if patch.Personality != "" {
-			b.Personality = patch.Personality
+		if patch.Personality != nil {
+			b.Personality = *patch.Personality
 		}
-		if patch.Workdir != "" {
-			b.Workdir = patch.Workdir
+		if patch.Workdir != nil {
+			b.Workdir = *patch.Workdir
 		}
 	})
 	if !ok {

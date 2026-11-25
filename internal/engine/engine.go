@@ -95,7 +95,11 @@ func Run(ctx context.Context, r Request) (Result, error) {
 		prompt = r.System + "\n\n" + prompt
 	}
 
-	args, useStdin := buildCLIArgs(r, prompt)
+	var helpText string
+	if strings.EqualFold(r.Engine.CLI, "opencode") || strings.EqualFold(r.Engine.ID, "opencode") {
+		helpText = probeCLIHelp(ctx, r.Engine.CLI)
+	}
+	args, useStdin := buildCLIArgsWithHelp(r, prompt, helpText)
 
 	cmd := exec.CommandContext(ctx, r.Engine.CLI, args...)
 	cmd.Env = append(os.Environ(),
@@ -193,11 +197,71 @@ func demoReply(prompt string) string {
 	return fmt.Sprintf("Halo! Ini balasan demo (tanpa CLI terpasang), jadi saya hanya menggemakan pesanmu:\n\n> %s\n\nUntuk jawaban sungguhan: pasang salah satu CLI agent (`claude`, `codex`, `grok`, `gemini`, `opencode`), lalu pilih engine-nya untuk bot ini. Mesin ini memakai ~20 MB RAM, bukan ~600 MB seperti build Electron.", p)
 }
 
+var (
+	cliHelpMu    sync.Mutex
+	cliHelpCache = map[string]string{}
+)
+
+func probeCLIHelp(ctx context.Context, bin string) string {
+	bin = strings.TrimSpace(bin)
+	if bin == "" {
+		return ""
+	}
+	cliHelpMu.Lock()
+	if cached, ok := cliHelpCache[bin]; ok {
+		cliHelpMu.Unlock()
+		return cached
+	}
+	cliHelpMu.Unlock()
+
+	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(hctx, bin, "--help").CombinedOutput()
+	text := string(out)
+	if err == nil || text != "" {
+		cliHelpMu.Lock()
+		cliHelpCache[bin] = text
+		cliHelpMu.Unlock()
+	}
+	return text
+}
+
 func buildCLIArgs(r Request, prompt string) ([]string, bool) {
+	return buildCLIArgsWithHelp(r, prompt, "")
+}
+
+func buildCLIArgsWithHelp(r Request, prompt, helpText string) ([]string, bool) {
 	args := append([]string{}, r.Engine.Args...)
 	useStdin := strings.EqualFold(r.Engine.Prompt, "stdin")
 	model := strings.TrimSpace(r.Model)
 	addModel := model != "" && !strings.EqualFold(model, "demo") && !containsAny(args, model) && !containsAny(args, "--model")
+
+	// OpenCode has two CLI distributions in the wild:
+	// 1) `--prompt "<text>"` (+ `--auto`, no `run` subcommand or `--model` flag)
+	// 2) `run [--model <m>] "<text>"` (opencode-ai)
+	// Adapting from `opencode --help` makes both work even with legacy config.json.
+	if (strings.EqualFold(r.Engine.CLI, "opencode") || strings.EqualFold(r.Engine.ID, "opencode")) && helpText != "" {
+		useStdin = false
+		if strings.Contains(helpText, "--prompt") {
+			args = nil
+			if strings.Contains(helpText, "--auto") {
+				args = append(args, "--auto")
+			}
+			if addModel && strings.Contains(helpText, "--model") {
+				args = append(args, "--model", model)
+			}
+			args = append(args, "--prompt", prompt)
+			return args, false
+		}
+		if strings.Contains(helpText, "\n  run") || strings.Contains(helpText, "\r\n  run") {
+			args = []string{"run"}
+			if addModel {
+				args = append(args, "--model", model)
+			}
+			args = append(args, prompt)
+			return args, false
+		}
+	}
 
 	if addModel {
 		// Gemini CLI's `-p` / `--prompt` flag takes the prompt string right after it,

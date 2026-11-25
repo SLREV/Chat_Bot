@@ -678,7 +678,7 @@
       codex:"Butuh CLI `codex` (OpenAI Codex) sudah login.",
       grok:"Butuh CLI `grok` (xAI) sudah login.",
       "gemini-cli":"Butuh CLI `gemini` (Gemini CLI) sudah login Google (punya tier gratis) atau set GEMINI_API_KEY.",
-      opencode:"Butuh CLI `opencode` (OpenCode CLI) sudah terpasang (mendukung model gratis Zen / provider lokal). Kosongkan Model untuk pakai default OpenCode.",
+      opencode:"Butuh CLI `opencode` sudah terpasang (otomatis mendeteksi `--auto --prompt` maupun `run`). Kosongkan Model untuk memakai model aktif OpenCode Anda.",
       echo:"Demo offline: tidak butuh CLI/key, bagus untuk mencoba UI."
     };
     $("#engineHint").textContent = (map[id] || (e? e.name : "")) + " Kalau CLI tidak ada, bot menampilkan pesan error yang jelas, bukan crash.";
