@@ -25,22 +25,24 @@ python3 desk/dashboard.py --run-crew --mode live --port 8788
 ```
 
 ### Tahap 2 — Dry-Run `simulateTransaction` via Solana RPC (tanpa private key)
-Uji routing Jupiter `/quote` + `/swap` + `simulateTransaction` di RPC Solana tanpa mengirim uang asli:
+Salin `.env.example` menjadi `.env` (otomatis dibaca `desk/config.py` dan di-ignore Git), isi `SOLANA_RPC_URL` & `SOLANA_PUBLIC_KEY`:
 ```bash
-export SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
-python3 desk/crew.py --simulate <MINT_SOLANA> --usd 2.0 --pubkey <ALAMAT_WALLET_ANDA>
+cp .env.example .env && chmod 600 .env
+# isi SOLANA_RPC_URL=... dan SOLANA_PUBLIC_KEY=... di .env
+python3 desk/crew.py --simulate <MINT_SOLANA> --usd 2.0
 ```
 
 ### Tahap 3 — Live On-Chain dengan Burner Wallet & Double-Lock
-Pasang signer ringan (`solders`), lalu aktifkan **keempat** variabel ENV berikut secara eksplisit:
+Pasang signer ringan (`solders`), lalu aktifkan **keempat** variabel di `.env` Anda:
 ```bash
 pip install -r desk/requirements-live.txt
 
-export DESK_EXECUTION_MODE=live
-export DESK_LIVE_CONFIRM=I_UNDERSTAND_REAL_MONEY
-export SOLANA_RPC_URL="https://<rpc-anda>"
-export SOLANA_PRIVATE_KEY="<base58-atau-path-ke-keypair-burner.json>"
-export DESK_MAX_LIVE_TRADE_USD=5.0   # batas maksimal modal per entry (default $5)
+# Di file .env:
+#   DESK_EXECUTION_MODE=live
+#   DESK_LIVE_CONFIRM=I_UNDERSTAND_REAL_MONEY
+#   SOLANA_RPC_URL=https://<rpc-anda>
+#   SOLANA_PRIVATE_KEY=<base58-atau-path-ke-keypair-burner.json>
+#   DESK_MAX_LIVE_TRADE_USD=5.0
 
 python3 desk/crew.py --doctor
 python3 desk/dashboard.py --run-crew --mode live --port 8788

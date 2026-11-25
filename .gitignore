@@ -4,3 +4,10 @@ __pycache__/
 *.pyc
 desk/data/
 desk/**/__pycache__/
+.env
+.env.*
+!.env.example
+desk/.env
+desk/.env.*
+!desk/.env.example
+*.keypair.json
