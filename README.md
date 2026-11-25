@@ -16,6 +16,29 @@ engine, model, dan kepribadian sendiri, dengan jawaban yang di-stream**.
 
 Angka RAM di atas diukur di sandbox Linux x64 dengan binary `dist/omb-linux-amd64`.
 
+> **Panduan instalasi lengkap** (tanpa build, dengan build, cross-compile Windows/macOS, setup CLI `gemini`/`opencode`/`claude`, serta 6-Agent Desk): lihat **[INSTALL.md](INSTALL.md)**.
+
+## Mulai Cepat (Tanpa Build vs Dengan Build)
+
+### 1. OpenMausBot UI (`omb`, butuh Go 1.24+)
+
+```sh
+# Tanpa build (langsung dari source)
+go run ./cmd/omb          # atau: make run
+
+# Dengan build (1 binary statis ~6 MB di bin/omb)
+make build
+./bin/omb                 # buka URL ?token=... yang tercetak di terminal
+```
+
+### 2. 6-Agent Trading Desk (`desk/`, cukup Python 3 stdlib — tanpa build)
+
+```sh
+cp .env.example .env && chmod 600 .env
+python3 desk/crew.py --doctor
+python3 desk/dashboard.py --run-crew --mode demo --port 8788
+```
+
 ## Provider API key (tanpa CLI)
 
 Selain CLI lokal, bot bisa memakai **API key** langsung ke vendor. Dua bentuk yang didukung:
@@ -356,7 +379,7 @@ raven) — masing-masing beda warna **dan** ekspresi mata/mulut. Semua ditanam s
 ## Isi fitur
 
 - **Roster bot seperti aplikasi chat** — sidebar, avatar, pencarian, status sibuk/idle.
-- **Engine per bot** — `claude`, `codex`, `grok`, atau engine apa pun yang mau kamu daftar di
+- **Engine per bot** — `claude`, `codex`, `grok`, `gemini-cli`, `opencode`, atau engine apa pun yang mau kamu daftar di
   `config.json` (binary + args). Ada **engine demo offline** supaya aplikasi langsung bisa dipakai
   sebelum CLI agent terpasang.
 - **Provider API key** — OpenAI/Anthropic/OpenRouter/Groq/DeepSeek/Ollama lewat HTTP + SSE, key
@@ -427,11 +450,11 @@ Yang perlu diketahui:
 Aplikasi ini tidak memanggil API model sendiri: ia menjalankan CLI agent yang sudah kamu login.
 
 ```sh
-npm i -g @anthropic-ai/claude-code     # atau: @openai/codex  /  grok CLI
-claude                                  # login sekali
+npm i -g @anthropic-ai/claude-code     # atau: @openai/codex / @google/gemini-cli / opencode / grok
+claude                                  # login sekali (atau: gemini / opencode)
 ```
 
-Lalu di UI: **✏️ Edit bot → Engine → Claude Code**. Kalau CLI tidak ada di PATH, bot menjawab dengan
+Lalu di UI: **✏️ Edit bot → Engine → Claude Code / Gemini CLI / OpenCode CLI**. Kalau CLI tidak ada di PATH, bot menjawab dengan
 pesan error yang jelas, bukan crash.
 
 Engine bisa ditambah/diubah di `~/.openmausbot-go/config.json`:
