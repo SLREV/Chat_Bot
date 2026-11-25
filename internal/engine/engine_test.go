@@ -121,4 +121,20 @@ func TestBuildCLIArgsForGeminiAndOpenCode(t *testing.T) {
 	if len(ocPromptArgs) != 3 || ocPromptArgs[0] != "--auto" || ocPromptArgs[1] != "--prompt" || ocPromptArgs[2] != "cek desk" {
 		t.Fatalf("expected --auto --prompt for prompt-flag opencode, got: %#v", ocPromptArgs)
 	}
+
+	// OpenCode variant that has both TUI `--prompt` and headless `run` subcommand must prefer `run`.
+	bothHelp := "FLAGS\n  --prompt string\nSUBCOMMANDS\n  upgrade\n  run\n"
+	ocBothArgs, _ := buildCLIArgsWithHelp(Request{
+		Engine: config.Engine{ID: "opencode", CLI: "opencode", Args: []string{"run"}, Prompt: "arg"},
+	}, "cek desk", bothHelp)
+	if len(ocBothArgs) != 2 || ocBothArgs[0] != "run" || ocBothArgs[1] != "cek desk" {
+		t.Fatalf("expected run subcommand to take priority over TUI --prompt, got: %#v", ocBothArgs)
+	}
+}
+
+func TestCleanStripsCSIAnsiAndOSCEscapes(t *testing.T) {
+	raw := "\x1b[0m\x1b[1;72H\x1b[?2026h\x1b]10;?\x07\x1b]7501;state=idle\x1b\\Halo dunia\x1b[0m"
+	if got := clean(raw); got != "Halo dunia" {
+		t.Fatalf("clean() = %q, want %q", got, "Halo dunia")
+	}
 }

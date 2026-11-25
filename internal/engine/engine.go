@@ -236,12 +236,20 @@ func buildCLIArgsWithHelp(r Request, prompt, helpText string) ([]string, bool) {
 	model := strings.TrimSpace(r.Model)
 	addModel := model != "" && !strings.EqualFold(model, "demo") && !containsAny(args, model) && !containsAny(args, "--model")
 
-	// OpenCode has two CLI distributions in the wild:
-	// 1) `--prompt "<text>"` (+ `--auto`, no `run` subcommand or `--model` flag)
-	// 2) `run [--model <m>] "<text>"` (opencode-ai)
+	// OpenCode has multiple CLI distributions in the wild:
+	// 1) `run [--model <m>] "<text>"` (headless subcommand — prefer over TUI `--prompt`)
+	// 2) `--prompt "<text>"` (+ `--auto`) when no headless subcommand exists
 	// Adapting from `opencode --help` makes both work even with legacy config.json.
 	if (strings.EqualFold(r.Engine.CLI, "opencode") || strings.EqualFold(r.Engine.ID, "opencode")) && helpText != "" {
 		useStdin = false
+		if strings.Contains(helpText, "\n  run") || strings.Contains(helpText, "\r\n  run") {
+			args = []string{"run"}
+			if addModel && (!strings.Contains(helpText, "--") || strings.Contains(helpText, "--model") || strings.Contains(helpText, "run")) {
+				args = append(args, "--model", model)
+			}
+			args = append(args, prompt)
+			return args, false
+		}
 		if strings.Contains(helpText, "--prompt") {
 			args = nil
 			if strings.Contains(helpText, "--auto") {
@@ -251,14 +259,6 @@ func buildCLIArgsWithHelp(r Request, prompt, helpText string) ([]string, bool) {
 				args = append(args, "--model", model)
 			}
 			args = append(args, "--prompt", prompt)
-			return args, false
-		}
-		if strings.Contains(helpText, "\n  run") || strings.Contains(helpText, "\r\n  run") {
-			args = []string{"run"}
-			if addModel {
-				args = append(args, "--model", model)
-			}
-			args = append(args, prompt)
 			return args, false
 		}
 	}
@@ -295,21 +295,39 @@ func chunk(s string, n int) []string {
 	return out
 }
 
-// clean strips ANSI colour codes and trailing whitespace from CLI output.
+// clean strips ANSI CSI/OSC/DCS terminal escape sequences and trailing whitespace from CLI output.
 func clean(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		if s[i] == 0x1b && i+1 < len(s) {
-			j := i + 1
-			if s[j] == '[' {
-				j++
+			next := s[i+1]
+			switch next {
+			case '[': // CSI: ESC [ ... <0x40-0x7E>
+				j := i + 2
 				for j < len(s) && !(s[j] >= '@' && s[j] <= '~') {
 					j++
 				}
+				i = j
+				continue
+			case ']', 'P', '_', '^': // OSC / DCS / APC / PM: terminated by BEL (0x07) or ST (ESC \)
+				j := i + 2
+				for j < len(s) {
+					if s[j] == 0x07 {
+						break
+					}
+					if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+						j++
+						break
+					}
+					j++
+				}
+				i = j
+				continue
+			default: // 2-byte ESC sequence
+				i++
+				continue
 			}
-			i = j
-			continue
 		}
 		b.WriteByte(s[i])
 	}
