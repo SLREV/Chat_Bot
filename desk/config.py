@@ -8,11 +8,44 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DESK_DATA_DIR", str(BASE_DIR / "data")))
 
-# Mode & execution safety
-PAPER = True  # Paper mode first; never places real on-chain orders here.
+# ---------------------------------------------------------------------------
+# Mode & safety lock bertahap (Tahap 1 -> Tahap 2 -> Tahap 3)
+# ---------------------------------------------------------------------------
+# Tahap 1 (--mode live, PAPER=True): data pasar & quote Jupiter live, order tetap paper.
+# Tahap 3 (on-chain live): wajib set ENV:
+#   DESK_EXECUTION_MODE=live
+#   DESK_LIVE_CONFIRM=I_UNDERSTAND_REAL_MONEY
+#   SOLANA_RPC_URL=https://...
+#   SOLANA_PRIVATE_KEY=...
+#   (opsional) DESK_MAX_LIVE_TRADE_USD=5.0  -> batas modal burner wallet per entry!
+PAPER = os.environ.get("DESK_EXECUTION_MODE", "paper").strip().lower() != "live"
+LIVE_CONFIRM_PHRASE = "I_UNDERSTAND_REAL_MONEY"
+MAX_LIVE_TRADE_USD = float(os.environ.get("DESK_MAX_LIVE_TRADE_USD", "5.0"))
+MIN_SOL_FOR_GAS = float(os.environ.get("DESK_MIN_SOL_FOR_GAS", "0.01"))
+
 MODEL = os.environ.get("DESK_GROK_MODEL", "grok-4.7")
 DASHBOARD_BIND = os.environ.get("DESK_BIND", "127.0.0.1")
 DASHBOARD_PORT = int(os.environ.get("DESK_PORT", "8788"))
+
+# Pengaturan transaksi Solana / Jupiter (Tahap 2 & Tahap 3)
+SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "")
+JUPITER_SWAP_URL = os.environ.get("DESK_JUPITER_SWAP_URL", "https://lite-api.jup.ag/swap/v1/swap")
+SLIPPAGE_BPS = int(os.environ.get("DESK_SLIPPAGE_BPS", "150"))
+PRIORITY_FEE_LAMPORTS = int(os.environ.get("DESK_PRIORITY_FEE_LAMPORTS", "50000"))
+TX_CONFIRM_TIMEOUT_SEC = float(os.environ.get("DESK_TX_CONFIRM_TIMEOUT_SEC", "45.0"))
+
+
+def is_live_execution_armed() -> tuple[bool, str]:
+    """Double-lock pengaman sebelum transaksi uang asli bisa dikirim ke Solana."""
+    if PAPER:
+        return False, "PAPER=True (mode paper aktif)"
+    if os.environ.get("DESK_LIVE_CONFIRM", "").strip() != LIVE_CONFIRM_PHRASE:
+        return False, f"DESK_LIVE_CONFIRM harus diisi '{LIVE_CONFIRM_PHRASE}'"
+    if not os.environ.get("SOLANA_RPC_URL", SOLANA_RPC_URL).strip():
+        return False, "SOLANA_RPC_URL belum diset"
+    if not os.environ.get("SOLANA_PRIVATE_KEY", "").strip():
+        return False, "SOLANA_PRIVATE_KEY belum diset"
+    return True, "armed (live on-chain burner cap)"
 
 # Capital & sizing (matching strict RM desk rules)
 EQUITY_START_USD = 150.0

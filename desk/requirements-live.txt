@@ -1,0 +1,4 @@
+# Dependensi opsional khusus Tahap 3 (eksekusi live on-chain Solana).
+# Tahap 1 (--mode live + PAPER=True) dan Tahap 2 (dry-run simulateTransaction)
+# berjalan 100% dengan Python 3 stdlib tanpa perlu install paket ini.
+solders>=0.21.0

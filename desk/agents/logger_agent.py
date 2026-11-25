@@ -13,10 +13,13 @@ from agents.filter_agent import RULE_LABELS
 
 
 def default_state() -> dict[str, Any]:
+    live_armed, _ = config.is_live_execution_armed()
     return {
         "updated_at": time.time(),
         "mode": "demo",
         "paper": config.PAPER,
+        "live_armed": live_armed,
+        "max_live_trade_usd": config.MAX_LIVE_TRADE_USD,
         "stopped": config.STOP_FILE.exists(),
         "stop_reason": "",
         "equity_usd": config.EQUITY_START_USD,
@@ -84,6 +87,10 @@ def append_log(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def sync_book_metrics(state: dict[str, Any], book: dict[str, Any]) -> None:
+    live_armed, _ = config.is_live_execution_armed()
+    state["paper"] = config.PAPER
+    state["live_armed"] = live_armed
+    state["max_live_trade_usd"] = config.MAX_LIVE_TRADE_USD
     eq = round(equity_of(book), 2)
     start = float(book.get("day_start_equity") or config.EQUITY_START_USD)
     pnl = round(eq - config.EQUITY_START_USD, 2)
@@ -114,5 +121,8 @@ def sync_book_metrics(state: dict[str, Any], book: dict[str, Any]) -> None:
             "gain_pct": gain_pct,
             "stop_pct": float(pos["stop_pct"]),
             "score": int(pos.get("score", 0)),
+            "execution": pos.get("execution", "paper"),
+            "tx_sig": pos.get("tx_sig"),
+            "token_amount_raw": int(pos.get("token_amount_raw") or 0),
         })
     state["open_positions"] = open_list
