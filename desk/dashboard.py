@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
+import secrets
 import sys
 import threading
 import time
 from collections import deque
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 DESK_DIR = Path(__file__).resolve().parent
 if str(DESK_DIR) not in sys.path:
@@ -268,7 +271,13 @@ HTML = r"""<!doctype html>
   }
 
   async function post(path, body){
-    const r = await fetch(path, {method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body||{})});
+    const r = await fetch(path, {
+      method:"POST",
+      headers:{"content-type":"application/json","x-desk-csrf":"1"},
+      body:JSON.stringify(body||{})
+    });
+    if(r.status===401){ location.reload(); return; }
+    if(!r.ok) return;
     const st = await r.json();
     render(st);
   }
@@ -281,7 +290,10 @@ HTML = r"""<!doctype html>
   };
   $("#resetBtn").onclick = ()=>post("/api/reset");
 
-  fetch("/api/state").then(r=>r.json()).then(render).catch(()=>{});
+  fetch("/api/state").then(r=>{
+    if(r.status===401){ location.reload(); return null; }
+    return r.json();
+  }).then(st=>{ if(st) render(st); }).catch(()=>{});
   const es = new EventSource("/api/events");
   es.onmessage = (ev)=>{ try{ render(JSON.parse(ev.data)); }catch{} };
 })();
@@ -290,6 +302,82 @@ HTML = r"""<!doctype html>
 </html>
 """
 
+LOGIN_HTML = r"""<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Masuk · 6-Agent Desk</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;padding:16px}
+  .box{width:100%;max-width:380px;background:#151b23;border:1px solid #26303d;border-radius:14px;padding:20px;display:grid;gap:12px}
+  h1{margin:0;font-size:17px}
+  p{margin:0;color:#8b949e;font-size:13px;line-height:1.45}
+  input{width:100%;padding:10px 12px;border-radius:9px;border:1px solid #26303d;background:#0d1117;color:#e6edf3;font-size:14px}
+  button{padding:10px 12px;border-radius:9px;border:0;background:#58a6ff;color:#0d1117;font-weight:700;font-size:14px;cursor:pointer}
+  .err{color:#f85149;font-size:12px;min-height:16px}
+</style>
+</head>
+<body>
+<form class="box" id="f">
+  <h1>🔐 6-Agent Trading Desk</h1>
+  <p>Masukkan token akses dari terminal saat dashboard dijalankan, atau buka URL dengan <code>?token=...</code>.</p>
+  <input id="tok" type="password" placeholder="Token akses" autocomplete="current-password" required>
+  <button type="submit">Masuk</button>
+  <div class="err" id="err"></div>
+</form>
+<script>
+document.getElementById("f").onsubmit = async (e) => {
+  e.preventDefault();
+  const err = document.getElementById("err");
+  err.textContent = "";
+  const token = document.getElementById("tok").value.trim();
+  const r = await fetch("/api/auth", {
+    method: "POST",
+    headers: {"content-type": "application/json", "x-desk-csrf": "1"},
+    body: JSON.stringify({token})
+  });
+  if (r.ok) { location.replace("/"); return; }
+  err.textContent = "Token tidak valid.";
+};
+</script>
+</body>
+</html>
+"""
+
+
+def ensure_auth_token() -> str:
+    env_tok = os.environ.get("DESK_AUTH_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if config.TOKEN_FILE.exists():
+        saved = config.TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if saved:
+            try:
+                os.chmod(config.TOKEN_FILE, 0o600)
+            except OSError:
+                pass
+            return saved
+    tok = secrets.token_urlsafe(32)
+    fd = os.open(str(config.TOKEN_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (tok + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    return tok
+
+
+class DeskHTTPServer(ThreadingHTTPServer):
+    def __init__(self, server_address: tuple[str, int], RequestHandlerClass: type[BaseHTTPRequestHandler], auth_token: str) -> None:
+        self.auth_token = auth_token
+        super().__init__(server_address, RequestHandlerClass)
+
+
+def _token_equal(a: str, b: str) -> bool:
+    return bool(a and b and hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8")))
+
 
 class DeskHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -297,11 +385,94 @@ class DeskHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return  # Keep terminal output quiet and RAM tiny
 
-    def _send_json(self, code: int, obj: Any) -> None:
+    def _expected_token(self) -> str:
+        return str(getattr(self.server, "auth_token", ""))
+
+    def _extract_token(self) -> tuple[str, bool]:
+        """Return (token, came_from_cookie)."""
+        auth_hdr = (self.headers.get("Authorization") or "").strip()
+        if auth_hdr.lower().startswith("bearer "):
+            return auth_hdr[7:].strip(), False
+        hdr_tok = (self.headers.get("X-Desk-Token") or "").strip()
+        if hdr_tok:
+            return hdr_tok, False
+        raw_cookie = self.headers.get("Cookie") or ""
+        if raw_cookie:
+            jar = SimpleCookie()
+            try:
+                jar.load(raw_cookie)
+            except Exception:
+                return "", False
+            morsel = jar.get("desk_token")
+            if morsel and morsel.value:
+                return morsel.value.strip(), True
+        return "", False
+
+    def _is_authed(self) -> tuple[bool, bool]:
+        tok, from_cookie = self._extract_token()
+        return _token_equal(tok, self._expected_token()), from_cookie
+
+    def _send_security_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+
+    def _set_session_cookie(self, token: str) -> None:
+        proto = (self.headers.get("X-Forwarded-Proto") or "").lower()
+        secure = "; Secure" if proto == "https" else ""
+        self.send_header("Set-Cookie", f"desk_token={token}; Path=/; HttpOnly; SameSite=Strict{secure}")
+
+    def _check_csrf(self, is_write: bool, auth_via_cookie: bool) -> bool:
+        sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if sfs == "cross-site":
+            self._send_json(403, {"error": "cross-site request rejected"})
+            return False
+
+        host = (self.headers.get("Host") or "").strip()
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            u = urlparse(origin)
+            if not u.netloc or not host or u.netloc.lower() != host.lower():
+                self._send_json(403, {"error": "origin not allowed"})
+                return False
+        elif is_write:
+            ref = (self.headers.get("Referer") or "").strip()
+            if ref:
+                u = urlparse(ref)
+                if not u.netloc or not host or u.netloc.lower() != host.lower():
+                    self._send_json(403, {"error": "referer not allowed"})
+                    return False
+
+        if is_write:
+            ct = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if (ct != "" or clen != 0) and ct != "application/json":
+                self._send_json(415, {"error": "Content-Type must be application/json"})
+                return False
+            if auth_via_cookie and (self.headers.get("X-Desk-CSRF") or "").strip() != "1":
+                self._send_json(403, {"error": "missing X-Desk-CSRF header"})
+                return False
+        return True
+
+    def _send_json(self, code: int, obj: Any, extra_headers: dict[str, str] | None = None) -> None:
         raw = json.dumps(obj).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
+        self._send_security_headers()
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_html(self, code: int, body: str) -> None:
+        raw = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._send_security_headers()
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -321,29 +492,49 @@ class DeskHandler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/health":
+            self._send_json(200, {"ok": True, "service": "grok-6-agent-desk"})
+            return
+
         if path == "/" or path == "/index.html":
-            raw = HTML.encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
+            qs = parse_qs(parsed.query)
+            qtok = (qs.get("token") or [""])[0].strip()
+            if qtok and _token_equal(qtok, self._expected_token()):
+                self.send_response(HTTPStatus.FOUND)
+                self._send_security_headers()
+                self._set_session_cookie(self._expected_token())
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
+            authed, _ = self._is_authed()
+            if not authed:
+                self._send_html(HTTPStatus.UNAUTHORIZED, LOGIN_HTML)
+                return
+            self._send_html(HTTPStatus.OK, HTML)
+            return
+
+        authed, _ = self._is_authed()
+        if not authed:
+            self._send_json(
+                401,
+                {"error": "authentication required"},
+                {"WWW-Authenticate": 'Bearer realm="Desk"'},
+            )
             return
 
         if path == "/api/state":
             self._send_json(200, logger_agent.load_state())
             return
 
-        if path == "/api/health":
-            self._send_json(200, {"ok": True, "service": "grok-6-agent-desk"})
-            return
-
         if path == "/api/events":
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
+            self._send_security_headers()
             self.send_header("Connection", "keep-alive")
             self.end_headers()
 
@@ -378,6 +569,37 @@ class DeskHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+
+        if path == "/api/auth":
+            if not self._check_csrf(is_write=True, auth_via_cookie=True):
+                return
+            body = self._read_json()
+            tok = str(body.get("token") or "").strip()
+            if not _token_equal(tok, self._expected_token()):
+                self._send_json(401, {"error": "invalid token"})
+                return
+            raw = json.dumps({"ok": True}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self._send_security_headers()
+            self._set_session_cookie(self._expected_token())
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        authed, from_cookie = self._is_authed()
+        if not authed:
+            self._send_json(
+                401,
+                {"error": "authentication required"},
+                {"WWW-Authenticate": 'Bearer realm="Desk"'},
+            )
+            return
+
+        if not self._check_csrf(is_write=True, auth_via_cookie=from_cookie):
+            return
+
         body = self._read_json()
 
         if path == "/api/pass":
@@ -440,8 +662,8 @@ def _crew_worker() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Lightweight 6-Agent Desk Dashboard")
-    parser.add_argument("--bind", default=os.environ.get("DESK_BIND", "0.0.0.0"), help="bind address (default 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("DESK_PORT", "8788")), help="HTTP port (default 8788)")
+    parser.add_argument("--bind", default=config.DASHBOARD_BIND, help="bind address (default 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=config.DASHBOARD_PORT, help="HTTP port (default 8788)")
     parser.add_argument("--mode", choices=("demo", "live"), default="demo", help="initial feed mode")
     parser.add_argument("--interval", type=float, default=6.0, help="crew loop interval in seconds")
     parser.add_argument("--run-crew", action="store_true", help="also run the 6-agent crew loop in background")
@@ -455,6 +677,7 @@ def main() -> int:
         _RUNTIME["crew_running"] = args.run_crew
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    auth_token = ensure_auth_token()
     if not config.STATE_FILE.exists():
         st = crew.run_pass(mode=args.mode, use_grok=args.grok)
     else:
@@ -466,8 +689,13 @@ def main() -> int:
         t = threading.Thread(target=_crew_worker, daemon=True)
         t.start()
 
-    srv = ThreadingHTTPServer((args.bind, args.port), DeskHandler)
-    print(f"6-Agent Desk Dashboard listening on http://{args.bind}:{args.port} (mode={args.mode}, crew={args.run_crew})", flush=True)
+    srv = DeskHTTPServer((args.bind, args.port), DeskHandler, auth_token=auth_token)
+    display_host = "127.0.0.1" if args.bind in ("0.0.0.0", "") else args.bind
+    print(
+        f"6-Agent Desk Dashboard listening on http://{args.bind}:{args.port} (mode={args.mode}, crew={args.run_crew})\n"
+        f"Auth URL: http://{display_host}:{args.port}/?token={quote(auth_token)}",
+        flush=True,
+    )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
