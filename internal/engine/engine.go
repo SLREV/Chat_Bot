@@ -95,16 +95,7 @@ func Run(ctx context.Context, r Request) (Result, error) {
 		prompt = r.System + "\n\n" + prompt
 	}
 
-	args := append([]string{}, r.Engine.Args...)
-	if r.Model != "" && !containsAny(args, r.Model) {
-		// Engines that take a model flag accept it here; those that do not
-		// simply ignore the extra argument on their own side.
-		args = append(args, "--model", r.Model)
-	}
-	useStdin := strings.EqualFold(r.Engine.Prompt, "stdin")
-	if !useStdin {
-		args = append(args, prompt)
-	}
+	args, useStdin := buildCLIArgs(r, prompt)
 
 	cmd := exec.CommandContext(ctx, r.Engine.CLI, args...)
 	cmd.Env = append(os.Environ(),
@@ -196,10 +187,32 @@ func demoTurn(ctx context.Context, r Request, start time.Time) (Result, error) {
 func demoReply(prompt string) string {
 	p := strings.TrimSpace(prompt)
 	if p == "" {
-		return "Halo! Saya bot demo offline. Pasang `claude`, `codex`, atau `grok` lalu pilih engine-nya di Settings untuk jawaban sungguhan."
+		return "Halo! Saya bot demo offline. Pasang `claude`, `codex`, `grok`, `gemini`, atau `opencode` lalu pilih engine-nya di Settings untuk jawaban sungguhan."
 	}
 	p = truncate(p, 400)
-	return fmt.Sprintf("Halo! Ini balasan demo (tanpa CLI terpasang), jadi saya hanya menggemakan pesanmu:\n\n> %s\n\nUntuk jawaban sungguhan: pasang salah satu CLI agent (`claude`, `codex`, `grok`), lalu di **Settings → Engine** pilih engine untuk bot ini. Mesin ini memakai ~20 MB RAM, bukan ~600 MB seperti build Electron.", p)
+	return fmt.Sprintf("Halo! Ini balasan demo (tanpa CLI terpasang), jadi saya hanya menggemakan pesanmu:\n\n> %s\n\nUntuk jawaban sungguhan: pasang salah satu CLI agent (`claude`, `codex`, `grok`, `gemini`, `opencode`), lalu pilih engine-nya untuk bot ini. Mesin ini memakai ~20 MB RAM, bukan ~600 MB seperti build Electron.", p)
+}
+
+func buildCLIArgs(r Request, prompt string) ([]string, bool) {
+	args := append([]string{}, r.Engine.Args...)
+	useStdin := strings.EqualFold(r.Engine.Prompt, "stdin")
+	model := strings.TrimSpace(r.Model)
+	addModel := model != "" && !strings.EqualFold(model, "demo") && !containsAny(args, model) && !containsAny(args, "--model")
+
+	if addModel {
+		// Gemini CLI's `-p` / `--prompt` flag takes the prompt string right after it,
+		// so `--model` must precede the trailing prompt flag rather than sit between `-p` and `prompt`.
+		if !useStdin && r.Engine.CLI == "gemini" && len(args) > 0 && (args[len(args)-1] == "-p" || args[len(args)-1] == "--prompt") {
+			pFlag := args[len(args)-1]
+			args = append(args[:len(args)-1], "--model", model, pFlag)
+		} else {
+			args = append(args, "--model", model)
+		}
+	}
+	if !useStdin {
+		args = append(args, prompt)
+	}
+	return args, useStdin
 }
 
 func chunk(s string, n int) []string {
