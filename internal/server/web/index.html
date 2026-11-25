@@ -139,6 +139,17 @@
   .ctx .sep{height:1px;background:var(--line);margin:5px 4px}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);padding:10px 16px;border-radius:12px;font-size:13px;opacity:0;pointer-events:none;transition:.2s;z-index:50}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(-4px)}
+  .deskbar{display:none;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--panel2) 78%,transparent);font-size:12.5px}
+  .deskbar.show{display:flex}
+  .desk-dot{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+  .desk-dot i{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+  .desk-dot.on i{background:var(--accent2)}
+  .deskbar select{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:4px 8px;font-size:12px}
+  .deskbar .mini{padding:5px 10px;border-radius:8px;background:var(--panel);border:1px solid var(--line);font-size:12px;font-weight:600}
+  .deskbar .mini:hover{border-color:#3a4757}
+  .deskbar .mini.pri{background:var(--accent);border-color:transparent;color:#fff}
+  .deskbar .mini.danger{color:var(--err)}
+  .deskbar .mini[disabled]{opacity:.45;cursor:not-allowed}
   @media (max-width:760px){
     .app{grid-template-columns:1fr;grid-template-rows:auto 1fr}
     .side{max-height:38dvh;border-right:none;border-bottom:1px solid var(--line)}
@@ -174,11 +185,28 @@
         <p id="sub">Setiap bot punya model, engine dan kepribadian sendiri</p>
       </div>
       <div class="top-actions">
+        <button class="btn ghost" id="deskToggleBtn" title="Kontrol 6-Agent Trading Desk" hidden>📊 Desk</button>
         <button class="btn ghost" id="stopBtn" title="Hentikan turn" hidden>⏹ Stop</button>
         <button class="btn ghost" id="editBtn" title="Edit bot / ganti avatar" hidden>✏️</button>
         <button class="btn ghost" id="moreBtn" title="Opsi bot" hidden>⋯</button>
       </div>
     </header>
+    <div class="deskbar" id="deskBar">
+      <span class="desk-dot" id="deskDot"><i></i><span id="deskStat">Desk: Off</span></span>
+      <select id="deskMode" title="Mode feed data">
+        <option value="live">Paper Live (Solana)</option>
+        <option value="demo">Demo offline</option>
+      </select>
+      <select id="deskSched" title="Jadwal & hemat token xAI">
+        <option value="30:0:0">Cek tiap 30d (0 token xAI)</option>
+        <option value="30:1:3000">Cek 30d · Grok tiap 50m (hemat)</option>
+        <option value="3000:1:3000">Loop 50m + Grok</option>
+      </select>
+      <button class="mini pri" id="deskStartBtn">▶ Start Desk</button>
+      <button class="mini danger" id="deskStopBtn" hidden>■ Stop Desk</button>
+      <button class="mini" id="deskPassBtn">⚡ 1 Pass</button>
+      <button class="mini" id="deskOpenBtn" disabled>↗ Buka :8788</button>
+    </div>
     <div class="warnbar" id="warnbar">
       <div style="font-size:16px">🔌</div>
       <div style="flex:1">
@@ -401,6 +429,7 @@
       el.ava.textContent = "🐭";
       el.edit.hidden = true; el.more.hidden = true; el.stop.hidden = true;
       renderWarn();
+      if(typeof renderDeskBar === "function") renderDeskBar();
       return;
     }
     el.title.textContent = b.emoji+" "+b.name;
@@ -416,6 +445,7 @@
     el.send.disabled = busy;
     el.input.placeholder = "Tulis pesan ke "+b.name+"… (Enter kirim)";
     renderWarn();
+    if(typeof renderDeskBar === "function") renderDeskBar();
   }
 
   async function selectBot(id){
@@ -1002,9 +1032,88 @@
     }
   };
 
+  // ---------- 6-Agent Desk controls ----------
+  let deskState = null;
+  let deskManualToggle = null;
+  function parseDeskSched(){
+    const parts = ($("#deskSched").value || "30:0:0").split(":");
+    return {
+      interval: parseInt(parts[0], 10) || 30,
+      grok: parts[1] === "1",
+      grokCooldownSec: parseInt(parts[2], 10) || 0,
+    };
+  }
+  function renderDeskBar(){
+    const b = botById(state.current);
+    const avail = !!(deskState && deskState.available);
+    $("#deskToggleBtn").hidden = !avail;
+    const autoShow = b && (b.id === "bot-chief" || (b.workdir||"").toLowerCase() === "desk");
+    const show = avail && (deskManualToggle !== null ? deskManualToggle : (autoShow || (deskState && deskState.running)));
+    $("#deskBar").classList.toggle("show", !!show);
+    if(!deskState || !avail) return;
+    const on = !!deskState.running;
+    $("#deskDot").className = "desk-dot" + (on ? " on" : "");
+    const eq = Number(deskState.equityUsd || 0).toFixed(2);
+    const tag = deskState.liveArmed ? "LIVE" : "Paper";
+    $("#deskStat").textContent = on
+      ? `Desk: On (${tag} · ${deskState.mode||"live"} · $${eq} · ${deskState.openCount||0}/3)`
+      : `Desk: Off ($${eq} · ${deskState.scanned||0} scan)`;
+    $("#deskStartBtn").hidden = on;
+    $("#deskStopBtn").hidden = !on;
+    $("#deskOpenBtn").disabled = !on || !deskState.url;
+  }
+  async function loadDeskStatus(){
+    try{
+      deskState = await api("/api/desk/status");
+      renderDeskBar();
+    }catch(_){}
+  }
+  $("#deskToggleBtn").onclick = ()=>{
+    const shown = $("#deskBar").classList.contains("show");
+    deskManualToggle = !shown;
+    renderDeskBar();
+  };
+  $("#deskStartBtn").onclick = async ()=>{
+    const sch = parseDeskSched();
+    $("#deskStartBtn").disabled = true;
+    $("#deskStartBtn").textContent = "Menyalakan…";
+    try{
+      deskState = await api("/api/desk/start", {
+        method:"POST",
+        body:JSON.stringify({mode:$("#deskMode").value, interval:sch.interval, grok:sch.grok, grokCooldownSec:sch.grokCooldownSec})
+      });
+      renderDeskBar();
+      toast("6-Agent Desk berjalan di :" + deskState.port);
+    }catch(e){ toast(e.message); }
+    finally{
+      $("#deskStartBtn").disabled = false;
+      $("#deskStartBtn").textContent = "▶ Start Desk";
+    }
+  };
+  $("#deskStopBtn").onclick = async ()=>{
+    try{
+      deskState = await api("/api/desk/stop", {method:"POST", body:"{}"});
+      renderDeskBar();
+      toast("Desk dihentikan");
+    }catch(e){ toast(e.message); }
+  };
+  $("#deskPassBtn").onclick = async ()=>{
+    const sch = parseDeskSched();
+    $("#deskPassBtn").disabled = true;
+    try{
+      deskState = await api("/api/desk/pass", {method:"POST", body:JSON.stringify({mode:$("#deskMode").value, grok:sch.grok})});
+      renderDeskBar();
+      toast(`1 Pass selesai · $${Number(deskState.equityUsd||0).toFixed(2)} (${deskState.scanned||0} scan)`);
+    }catch(e){ toast(e.message); }
+    finally{ $("#deskPassBtn").disabled = false; }
+  };
+  $("#deskOpenBtn").onclick = ()=>{
+    if(deskState && deskState.url) window.open(deskState.url, "_blank", "noopener,noreferrer");
+  };
+
   // ---------- boot ----------
   loadState()
-    .then(()=>{ if(!sseConn) sseConn = connect(); })
+    .then(()=>{ if(!sseConn) sseConn = connect(); loadDeskStatus(); })
     .catch(e=>{
       if(e.status === 401){ showAuth(); return; }
       el.bots.innerHTML = `<div class="bot-prev" style="padding:14px;color:var(--err)">${esc(e.message)}</div>`;

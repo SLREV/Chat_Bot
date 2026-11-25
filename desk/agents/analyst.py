@@ -5,10 +5,13 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import time
 from typing import Any
 
 import config
 from agents import post_json
+
+_LAST_GROK_CALL_TS = 0.0
 
 GROK_PROMPT = """You are the ANALYST on a 6-agent Solana trading desk.
 Token ${symbol} (mint {mint}) already passed 8 hard safety checks.
@@ -88,8 +91,16 @@ def score_token(sig: dict[str, Any], facts: dict[str, Any], use_grok: bool = Fal
 
     note = "quant"
     if use_grok:
-        delta, note = _grok_adjustment(str(facts.get("symbol", sig.get("symbol", ""))), str(sig.get("mint", "")))
-        score += delta
+        global _LAST_GROK_CALL_TS
+        # Grok adjustment is bounded to [-15, +15]. Skip API call when quant score already decides pass/fail.
+        if score <= config.MIN_ANALYST_SCORE - 16 or score >= config.MIN_ANALYST_SCORE + 15:
+            note = "quant-decided (grok skipped)"
+        elif config.GROK_COOLDOWN_SEC > 0 and _LAST_GROK_CALL_TS > 0 and (time.time() - _LAST_GROK_CALL_TS) < config.GROK_COOLDOWN_SEC:
+            note = "grok cooldown"
+        else:
+            _LAST_GROK_CALL_TS = time.time()
+            delta, note = _grok_adjustment(str(facts.get("symbol", sig.get("symbol", ""))), str(sig.get("mint", "")))
+            score += delta
 
     score = max(0, min(100, int(round(score))))
     passed = score >= config.MIN_ANALYST_SCORE

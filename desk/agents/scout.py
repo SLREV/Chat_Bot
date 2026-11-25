@@ -22,6 +22,21 @@ def _synthetic_mint(symbol: str, seq: int) -> str:
     return (base + "11111111111111111111111111111111")[:44]
 
 
+def _clean_symbol(item: dict[str, Any], mint: str) -> str:
+    """Ambil ticker yang valid; abaikan URL gambar DexScreener seperti https://cdn.dexs."""
+    for key in ("symbol", "tokenSymbol", "ticker"):
+        val = str(item.get(key) or "").strip().lstrip("$")
+        if val and "://" not in val and "/" not in val and len(val) <= 16:
+            return val
+    desc = str(item.get("description") or "")
+    for tok in desc.split():
+        if tok.startswith("$") and len(tok) > 1:
+            cand = tok[1:].strip(".,:;!?()[]{}\"'")
+            if cand and "://" not in cand and "/" not in cand and len(cand) <= 16:
+                return cand
+    return mint[:6]
+
+
 def scan_live(limit: int = 12) -> tuple[list[dict[str, Any]], str | None]:
     """Fetch fresh Solana token candidates from DexScreener boosts."""
     try:
@@ -46,7 +61,7 @@ def scan_live(limit: int = 12) -> tuple[list[dict[str, Any]], str | None]:
         seen_mints.add(mint)
         out.append({
             "mint": mint,
-            "symbol": str(item.get("header") or item.get("description") or mint[:6]).strip()[:16] or mint[:6],
+            "symbol": _clean_symbol(item, mint),
             "dex": "Pump.fun + Raydium",
             "source": "dexscreener",
             "ts": now,

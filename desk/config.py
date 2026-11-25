@@ -65,6 +65,7 @@ MAX_LIVE_TRADE_USD = float(os.environ.get("DESK_MAX_LIVE_TRADE_USD", "5.0"))
 MIN_SOL_FOR_GAS = float(os.environ.get("DESK_MIN_SOL_FOR_GAS", "0.01"))
 
 MODEL = os.environ.get("DESK_GROK_MODEL", "grok-4.7")
+GROK_COOLDOWN_SEC = max(0.0, float(os.environ.get("DESK_GROK_COOLDOWN_SEC", "0")))
 DASHBOARD_BIND = os.environ.get("DESK_BIND", "127.0.0.1")
 DASHBOARD_PORT = int(os.environ.get("DESK_PORT", "8788"))
 

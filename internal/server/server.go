@@ -36,6 +36,7 @@ type Server struct {
 	st      *store.Store
 	mgr     *agent.Manager
 	hub     *hub
+	desk    *deskProc
 	bind    string
 	port    int
 	mu      sync.Mutex
@@ -46,7 +47,7 @@ type Server struct {
 // New builds a server. When bound to a non-loopback address, a random auth
 // token is generated automatically unless overridden via SetAuthToken.
 func New(cfg *config.Settings, provs *config.Providers, st *store.Store, mgr *agent.Manager, bind string, port int) *Server {
-	s := &Server{cfg: cfg, provs: provs, st: st, mgr: mgr, hub: newHub(), bind: bind, port: port}
+	s := &Server{cfg: cfg, provs: provs, st: st, mgr: mgr, hub: newHub(), desk: &deskProc{}, bind: bind, port: port}
 	if !isLoopbackBind(bind) {
 		s.token = GenerateToken()
 	}
@@ -129,6 +130,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/providers/{id}/models/sync", api(s.syncProviderModels))
 	mux.Handle("POST /api/providers/{id}/check-model", api(s.checkModel))
 
+	// 6-Agent Trading Desk controls (start/stop/1-pass/status)
+	mux.Handle("GET /api/desk/status", api(s.deskStatus))
+	mux.Handle("POST /api/desk/start", api(s.deskStart))
+	mux.Handle("POST /api/desk/stop", api(s.deskStop))
+	mux.Handle("POST /api/desk/pass", api(s.deskPass))
+
 	ui, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Printf("embedded UI missing: %v", err)
@@ -158,8 +165,9 @@ func (s *Server) Listen() error {
 	return srv.Serve(ln)
 }
 
-// Shutdown gracefully stops the HTTP listener.
+// Shutdown gracefully stops the HTTP listener and any managed desk dashboard process.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopManagedDesk()
 	s.mu.Lock()
 	srv := s.httpSrv
 	s.mu.Unlock()

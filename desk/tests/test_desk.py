@@ -381,6 +381,43 @@ class DeskTestCase(unittest.TestCase):
         eq = executor.equity_of(book)
         self.assertLess(eq, 5_000.0)
 
+    def test_scout_ignores_cdn_urls_and_analyst_saves_grok_tokens(self) -> None:
+        from agents import scout
+
+        # 1) DexScreener boosts puts CDN image URLs in `header` — must never become ticker symbol
+        sym = scout._clean_symbol(
+            {"header": "https://cdn.dexscreener.com/cms/images/abc", "description": "Check out $BONK2 now"},
+            "MintXYZ123456789",
+        )
+        self.assertEqual(sym, "BONK2")
+        sym_fallback = scout._clean_symbol(
+            {"header": "https://cdn.dexscreener.com/cms/images/abc", "description": "https://example.com"},
+            "MintXYZ123456789",
+        )
+        self.assertEqual(sym_fallback, "MintXY")
+
+        # 2) Analyst skips Grok when quant score already decides pass (>=85) or fail (<=54)
+        analyst._LAST_GROK_CALL_TS = 0.0
+        with mock.patch.object(analyst, "_grok_adjustment", return_value=(5, "called")) as g_mock:
+            # High quant score (>=85) -> skip Grok
+            ok_hi, _, sum_hi = analyst.score_token({"mint": "M1", "symbol": "HI"}, _clean_facts(), use_grok=True)
+            self.assertTrue(ok_hi)
+            self.assertIn("quant-decided", sum_hi)
+            self.assertFalse(g_mock.called)
+
+            # Mid quant score (70-84 range, e.g. 73) -> calls Grok once, then cooldown blocks immediate 2nd call
+            mid = _clean_facts(liq_usd=75_000, volume_h1_usd=30_000, top10_pct=19.0, dev_pct=1.8, bundled_pct=5.0, h1_change_pct=2.0, holders=200)
+            prev_cd = config.GROK_COOLDOWN_SEC
+            try:
+                config.GROK_COOLDOWN_SEC = 3000.0
+                analyst.score_token({"mint": "M2", "symbol": "MID"}, mid, use_grok=True)
+                self.assertEqual(g_mock.call_count, 1)
+                _, _, sum_cd = analyst.score_token({"mint": "M3", "symbol": "MID2"}, mid, use_grok=True)
+                self.assertEqual(g_mock.call_count, 1)
+                self.assertIn("cooldown", sum_cd)
+            finally:
+                config.GROK_COOLDOWN_SEC = prev_cd
+
 
 if __name__ == "__main__":
     unittest.main()
