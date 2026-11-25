@@ -153,6 +153,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	var notes []string
 	var badBaseURL bool
+	var baseURLSwapNeedsKey bool
 	cur, ok, err := s.provs.Update(id, func(cur *config.Provider) error {
 		if strings.TrimSpace(in.Name) != "" {
 			cur.Name = strings.TrimSpace(in.Name)
@@ -163,6 +164,13 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
 			if !strings.HasPrefix(b, "http://") && !strings.HasPrefix(b, "https://") {
 				badBaseURL = true
+				return errBadInput
+			}
+			// Prevent exfiltrating a stored key by pointing an existing provider
+			// at a different host without explicitly re-entering or clearing the key.
+			if b != strings.TrimRight(cur.BaseURL, "/") && cur.APIKey != "" &&
+				(in.APIKey == nil || strings.TrimSpace(*in.APIKey) == "") {
+				baseURLSwapNeedsKey = true
 				return errBadInput
 			}
 			cur.BaseURL = b
@@ -210,6 +218,10 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if badBaseURL {
 		writeErr(w, 400, "base URL harus diawali http:// atau https://")
+		return
+	}
+	if baseURLSwapNeedsKey {
+		writeErr(w, 400, "mengubah Base URL pada provider yang sudah memiliki key harus menyertakan API key baru atau \"__clear__\"")
 		return
 	}
 	if err != nil {
