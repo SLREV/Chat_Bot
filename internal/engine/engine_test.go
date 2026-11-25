@@ -111,4 +111,14 @@ func TestBuildCLIArgsForGeminiAndOpenCode(t *testing.T) {
 	if len(ocModelArgs) != 4 || ocModelArgs[0] != "run" || ocModelArgs[1] != "--model" || ocModelArgs[2] != "google/gemini-2.5-flash" || ocModelArgs[3] != "cek desk" {
 		t.Fatalf("unexpected opencode args with model: %#v", ocModelArgs)
 	}
+
+	// OpenCode variant with `--auto` + `--prompt string` and no `--model` flag
+	promptFlagHelp := "USAGE\n  opencode <subcommand> [flags]\nFLAGS\n  --auto\n  --prompt string\n"
+	ocPromptArgs, _ := buildCLIArgsWithHelp(Request{
+		Model:  "DeepSeek V4.1 Flash Free",
+		Engine: config.Engine{ID: "opencode", CLI: "opencode", Args: []string{"run"}, Prompt: "arg"},
+	}, "cek desk", promptFlagHelp)
+	if len(ocPromptArgs) != 3 || ocPromptArgs[0] != "--auto" || ocPromptArgs[1] != "--prompt" || ocPromptArgs[2] != "cek desk" {
+		t.Fatalf("expected --auto --prompt for prompt-flag opencode, got: %#v", ocPromptArgs)
+	}
 }

@@ -74,6 +74,8 @@ func Default() *Settings {
 			{ID: "claude", Name: "Claude Code", CLI: "claude", Args: []string{"-p", "--output-format", "json"}, Prompt: "arg", Enabled: true},
 			{ID: "codex", Name: "Codex CLI", CLI: "codex", Args: []string{"exec", "--json"}, Prompt: "arg", Enabled: true},
 			{ID: "grok", Name: "Grok CLI", CLI: "grok", Args: []string{"-p"}, Prompt: "arg", Enabled: true},
+			{ID: "gemini-cli", Name: "Gemini CLI", CLI: "gemini", Args: []string{"-p"}, Prompt: "arg", Enabled: true},
+			{ID: "opencode", Name: "OpenCode CLI", CLI: "opencode", Args: []string{"run"}, Prompt: "arg", Enabled: true},
 			{ID: "echo", Name: "Demo (offline)", CLI: "", Prompt: "arg", Enabled: true},
 		},
 		Bots: []Bot{
@@ -107,7 +109,11 @@ func Load() (*Settings, error) {
 		return nil, err
 	}
 	s.path = Path()
+	prevLen := len(s.Engines)
 	s.normalize()
+	if len(s.Engines) != prevLen {
+		_ = s.Save()
+	}
 	return s, nil
 }
 
