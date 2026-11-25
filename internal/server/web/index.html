@@ -214,6 +214,10 @@
         </label>
       </div>
       <label class="field">Kepribadian (system prompt)
+        <div class="hint" style="margin-bottom:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button type="button" class="mini" id="presetChief">🧠 Pakai Skill Chief of Staff</button>
+          <span>Preset 6-agent desk (Scout, Filter, Analyst, Executor, Risk, Logger)</span>
+        </div>
         <textarea name="personality" placeholder="Kamu adalah Maus, asisten yang tenang dan presisi…"></textarea>
       </label>
       <label class="field">Folder kerja (opsional)
@@ -676,6 +680,14 @@
     }catch(e){ out.innerHTML = `<span class="bad-txt">✗ ${esc(e.message)}</span>`; }
   };
   $("#newBot").onclick = ()=>openBotDialog(null);
+  $("#presetChief").onclick = ()=>{
+    const f = $("#botForm");
+    if(!f.name.value.trim()) f.name.value = "Chief of Staff";
+    if(!f.emoji.value.trim() || f.emoji.value === "🤖") f.emoji.value = "🧠";
+    f.personality.value = "You are the Chief of Staff orchestrating a 6-agent trading desk (Scout, Filter, Analyst, Executor, Risk, Logger) in PAPER MODE by default. Never fabricate live data; always verify Filter's 8 hard kill rules (fail-closed) before Analyst scoring (>=70), enforce max 8% equity sizing, -6% hard stop, trailing stop from +12%, and -15% daily circuit breaker. Reply concisely in the user's language with structured status, positions, and exact desk commands when verification is needed.";
+    if(!f.workdir.value.trim()) f.workdir.value = "desk";
+    toast("Preset Chief of Staff diterapkan");
+  };
   el.edit.onclick = ()=>openBotDialog(botById(state.current));
   $("#saveBtn").onclick = async ()=>{
     const f = $("#botForm");
