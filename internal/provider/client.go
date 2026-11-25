@@ -131,10 +131,6 @@ func Stream(ctx context.Context, r Request) (Result, error) {
 	if r.MaxTokens <= 0 {
 		r.MaxTokens = 2048
 	}
-	model := r.Model
-	if model == "" {
-		model = r.Provider.DefaultModel
-	}
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
@@ -417,7 +413,9 @@ func streamAnthropic(ctx context.Context, r Request, model, key string) (Result,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("x-api-key", key)
+	if key != "" {
+		req.Header.Set("x-api-key", key)
+	}
 
 	res, err := httpClient.Do(req)
 	if err != nil {
@@ -555,9 +553,7 @@ func creditsError(res *http.Response, p config.Provider, requested int) error {
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
 	msg := extractMessage(raw)
 	// Keep the readable part short: providers paste URLs and sales copy.
-	if len(msg) > 220 {
-		msg = msg[:220] + "…"
-	}
+	msg = truncateRunes(msg, 220)
 	affordable := parseAffordable(msg)
 	lower := strings.ToLower(msg)
 	kind := "balance"
@@ -615,10 +611,15 @@ func suffix(msg string) string {
 	if msg == "" {
 		return ""
 	}
-	if len(msg) > 300 {
-		msg = msg[:300] + "…"
+	return " — " + truncateRunes(msg, 300)
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return " — " + msg
+	return string(r[:n]) + "…"
 }
 
 // extractMessage pulls the readable part out of an OpenAI- or Anthropic-style
@@ -640,8 +641,8 @@ func extractMessage(raw []byte) string {
 		}
 	}
 	s := strings.TrimSpace(string(raw))
-	if len(s) > 200 {
-		s = s[:200]
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200])
 	}
 	if strings.HasPrefix(s, "<") {
 		return "" // HTML error page (proxy / captive portal): not useful
@@ -653,9 +654,9 @@ func describeNetErr(err error, p config.Provider) error {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%s tidak menjawab sebelum batas waktu", p.Name)
+		return fmt.Errorf("%s tidak menjawab sebelum batas waktu: %w", p.Name, err)
 	case errors.Is(err, context.Canceled):
-		return errors.New("permintaan dibatalkan")
+		return fmt.Errorf("permintaan dibatalkan: %w", err)
 	case strings.Contains(msg, "no such host"):
 		return fmt.Errorf("tidak bisa menemukan %s — cek koneksi internet atau Base URL", p.BaseURL)
 	case strings.Contains(msg, "connection refused"):
@@ -718,6 +719,5 @@ func probeLocal(ctx context.Context, p config.Provider) (bool, string) {
 }
 
 func isLocal(p config.Provider) bool {
-	base := strings.ToLower(p.BaseURL)
-	return strings.Contains(base, "127.0.0.1") || strings.Contains(base, "localhost") || strings.Contains(base, "0.0.0.0")
+	return config.IsLocalURL(p.BaseURL)
 }

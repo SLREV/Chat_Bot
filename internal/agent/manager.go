@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type Manager struct {
 	provs *config.Providers
 	store *store.Store
 
+	tellMu    sync.Mutex
 	mu        sync.Mutex
 	queues    map[string]chan job
 	running   map[string]bool
@@ -32,6 +34,7 @@ type Manager struct {
 }
 
 type job struct {
+	msgID  string
 	prompt string
 }
 
@@ -53,12 +56,12 @@ var ErrBusy = errors.New("bot sedang sibuk; terlalu banyak pesan mengantre")
 // Tell queues a user message for a bot and returns immediately. The answer
 // arrives over the store's subscription as assistant messages.
 func (m *Manager) Tell(botID, prompt string) error {
+	m.tellMu.Lock()
+	defer m.tellMu.Unlock()
+
 	bot, ok := m.bot(botID)
 	if !ok {
 		return errors.New("bot tidak ditemukan")
-	}
-	if _, err := m.store.Append(store.Message{Thread: bot.ID, Role: store.RoleUser, Text: prompt}); err != nil {
-		return err
 	}
 
 	m.mu.Lock()
@@ -67,14 +70,29 @@ func (m *Manager) Tell(botID, prompt string) error {
 		q = make(chan job, 8)
 		m.queues[botID] = q
 	}
+	full := len(q) >= cap(q)
 	m.mu.Unlock()
-
-	select {
-	case q <- job{prompt: prompt}:
-	default:
+	if full {
 		return ErrBusy
 	}
-	go m.ensureRunner(botID)
+
+	msg, err := m.store.Append(store.Message{Thread: bot.ID, Role: store.RoleUser, Text: prompt})
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	select {
+	case q <- job{msgID: msg.ID, prompt: prompt}:
+	default:
+		m.mu.Unlock()
+		return ErrBusy
+	}
+	if !m.running[botID] {
+		m.running[botID] = true
+		go m.runLoop(botID, q)
+	}
+	m.mu.Unlock()
 	return nil
 }
 
@@ -90,6 +108,21 @@ func (m *Manager) Interrupt(botID string) bool {
 	return true
 }
 
+// CancelAll cancels every currently running turn (used during shutdown).
+func (m *Manager) CancelAll() {
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.cancel))
+	for _, fn := range m.cancel {
+		if fn != nil {
+			cancels = append(cancels, fn)
+		}
+	}
+	m.mu.Unlock()
+	for _, fn := range cancels {
+		fn()
+	}
+}
+
 // Busy reports whether a bot has a turn in flight.
 func (m *Manager) Busy(botID string) bool {
 	m.mu.Lock()
@@ -98,42 +131,32 @@ func (m *Manager) Busy(botID string) bool {
 }
 
 func (m *Manager) bot(id string) (config.Bot, bool) {
-	for _, b := range m.cfg.Snapshot() {
-		if b.ID == id {
-			return b, true
-		}
-	}
-	return config.Bot{}, false
+	return m.cfg.BotByID(id)
 }
 
-// ensureRunner starts the single consumer goroutine for a bot if it is absent.
-func (m *Manager) ensureRunner(botID string) {
-	m.mu.Lock()
-	q := m.queues[botID]
-	if q == nil {
-		m.mu.Unlock()
-		return
-	}
-	if m.running[botID] {
-		m.mu.Unlock()
-		return
-	}
-	m.running[botID] = true
-	m.mu.Unlock()
-
+// runLoop drains the single consumer queue for a bot and clears running state
+// atomically with the empty-queue check so no Tell can miss a wakeup.
+func (m *Manager) runLoop(botID string, q chan job) {
 	defer func() {
 		m.mu.Lock()
-		m.running[botID] = false
+		if m.running[botID] {
+			m.running[botID] = false
+		}
 		delete(m.cancel, botID)
 		m.mu.Unlock()
 	}()
 
 	for {
 		var next job
+		m.mu.Lock()
 		select {
 		case next = <-q:
+			m.mu.Unlock()
 		default:
-			return // queue drained: the next Tell restarts this goroutine
+			m.running[botID] = false
+			delete(m.cancel, botID)
+			m.mu.Unlock()
+			return
 		}
 		m.runTurn(botID, next)
 	}
@@ -158,7 +181,7 @@ func (m *Manager) runTurn(botID string, j job) {
 		System:  systemPrompt(bot),
 		Model:   bot.Model,
 		Workdir: bot.Workdir,
-		Timeout: time.Duration(m.cfg.TimeoutSec) * time.Second,
+		Timeout: m.cfg.Timeout(),
 		OnChunk: onChunk,
 	}
 
@@ -166,6 +189,7 @@ func (m *Manager) runTurn(botID string, j job) {
 	// anything else spawns a CLI. That single rule keeps bots portable: switch
 	// a bot from Claude CLI to an OpenAI key without touching its transcript.
 	route := "cli"
+	usedEngine := bot.Engine
 	msgModel, msgNote := bot.Model, ""
 	maxTokens := 0
 	if pr, ok := m.provs.ByID(bot.Engine); ok {
@@ -175,7 +199,7 @@ func (m *Manager) runTurn(botID string, j job) {
 		req.Model = resolveModel(bot.Model, pr)
 		maxTokens = pr.MaxTokens
 		req.Provider = &pr
-		req.History = m.history(bot.ID, pr)
+		req.History = m.history(bot.ID, pr, j.msgID)
 		prID := pr.ID
 		req.OnModelsStale = func(missing string) []string { return m.refreshModels(prID) }
 		modelNote := ""
@@ -210,14 +234,17 @@ func (m *Manager) runTurn(botID string, j job) {
 		failures = append(failures, shortReason(req.Provider.Name, err))
 		for _, alt := range m.provs.Chain(req.Provider.ID) {
 			altCopy := alt
+			altID := altCopy.ID
 			attempt := req
 			attempt.Provider = &altCopy
 			attempt.Model = resolveModel("", altCopy)
 			attempt.MaxTokens = altCopy.MaxTokens
+			attempt.OnModelsStale = func(missing string) []string { return m.refreshModels(altID) }
 			altRes, altErr := engine.Run(ctx, attempt)
 			if altErr == nil && altRes.Text != "" {
 				res, err = altRes, nil
 				fellBackTo = altCopy.Name
+				usedEngine = altCopy.ID
 				msgModel = attempt.Model
 				break
 			}
@@ -234,28 +261,30 @@ func (m *Manager) runTurn(botID string, j job) {
 
 	if res.RecoveredModel != "" {
 		msgModel = res.RecoveredModel
-		label := bot.Engine
-		if req.Provider != nil && req.Provider.Name != "" {
-			label = req.Provider.Name
+		label := usedEngine
+		if usedPr, ok := m.provs.ByID(usedEngine); ok && usedPr.Name != "" {
+			label = usedPr.Name
 		}
 		msgNote += " (model " + res.RecoveredFrom + " sudah tidak tersedia di " + label + "; dipakai " + res.RecoveredModel + " — setelan bot ikut diperbarui)"
-		if bot, ok := m.bot(botID); ok {
-			bot.Model = res.RecoveredModel
-			m.cfg.UpsertBot(bot)
-			_ = m.cfg.Save()
+		if fellBackTo == "" {
+			if _, ok := m.cfg.UpdateBot(botID, func(b *config.Bot) {
+				b.Model = res.RecoveredModel
+			}); ok {
+				_ = m.cfg.Save()
+			}
 		}
 	}
 	if fellBackTo != "" {
 		msgNote += " (dialihkan ke " + fellBackTo + " karena provider utama tidak bisa menjawab)"
 	}
 	if res.ReducedTo > 0 {
-		msgNote += " (kredit habis: jawaban dipendekkan ke " + itoa(res.ReducedTo) + " token)"
+		msgNote += " (kredit habis: jawaban dipendekkan ke " + strconv.Itoa(res.ReducedTo) + " token)"
 	}
 	msg := store.Message{
 		Thread: bot.ID,
 		Role:   store.RoleAssistant,
 		Text:   res.Text,
-		Engine: route + ":" + bot.Engine,
+		Engine: route + ":" + usedEngine,
 		Model:  msgModel,
 		Ms:     res.Millis,
 	}
@@ -284,7 +313,13 @@ func (m *Manager) runTurn(botID string, j job) {
 func resolveModel(want string, pr config.Provider) string {
 	want = strings.TrimSpace(want)
 	if want == "" {
-		return pr.DefaultModel
+		if pr.DefaultModel != "" {
+			return pr.DefaultModel
+		}
+		if len(pr.Models) > 0 {
+			return pr.Models[0]
+		}
+		return ""
 	}
 
 	// A ":free" suffix is an OpenRouter convention. DeepSeek and friends reject
@@ -323,15 +358,24 @@ func isOpenRouter(pr config.Provider) bool {
 // history builds the last few turns for a provider call. Long transcripts are
 // trimmed (characters, not messages) so a big thread cannot blow the context
 // window or the memory budget of a small laptop.
-func (m *Manager) history(botID string, pr config.Provider) []provider.Message {
+func (m *Manager) history(botID string, pr config.Provider, currentMsgID string) []provider.Message {
 	const (
 		maxTurns = 12
 		maxChars = 12000
 	)
 	recent := m.store.Recent(botID)
+	cutoff := len(recent)
+	if currentMsgID != "" {
+		for i := len(recent) - 1; i >= 0; i-- {
+			if recent[i].ID == currentMsgID {
+				cutoff = i
+				break
+			}
+		}
+	}
 	msgs := []provider.Message{}
 	budget := maxChars
-	for i := len(recent) - 1; i >= 0 && len(msgs) < maxTurns; i-- {
+	for i := cutoff - 1; i >= 0 && len(msgs) < maxTurns; i-- {
 		msg := recent[i]
 		if msg.Role != store.RoleUser && msg.Role != store.RoleAssistant {
 			continue
@@ -340,20 +384,25 @@ func (m *Manager) history(botID string, pr config.Provider) []provider.Message {
 		if text == "" || msg.Err != "" {
 			continue
 		}
-		if len(text) > budget {
+		r := []rune(text)
+		if len(r) > budget {
 			if budget < 500 {
 				break
 			}
-			text = text[:budget]
+			text = string(r[:budget])
+			budget = 0
+		} else {
+			budget -= len(r)
 		}
-		budget -= len(text)
 		// Prepending keeps chronological order without a second pass.
 		msgs = append([]provider.Message{{Role: msg.Role, Content: text}}, msgs...)
 	}
-	// The just-sent user message is appended by engine.Run, so drop the copy
-	// that is already in Recent to avoid sending it twice.
-	if n := len(msgs); n > 0 && msgs[n-1].Role == store.RoleUser {
-		msgs = msgs[:n-1]
+	// When no message id cutoff was matched, drop a trailing user message so
+	// engine.Run does not send it twice.
+	if cutoff == len(recent) {
+		if n := len(msgs); n > 0 && msgs[n-1].Role == store.RoleUser {
+			msgs = msgs[:n-1]
+		}
 	}
 	_ = pr
 	return msgs
@@ -439,20 +488,6 @@ func isCredits(err error) bool {
 	return errors.As(err, &ce)
 }
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [8]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
-}
-
 func systemPrompt(b config.Bot) string {
 	base := b.Personality
 	if base == "" {
@@ -491,8 +526,8 @@ func shortReason(name string, err error) string {
 	case errors.Is(err, provider.ErrUnreachable):
 		return name + ": tidak bisa dihubungi (server mati / Base URL salah)"
 	}
-	if len(msg) > 120 {
-		msg = msg[:120] + "…"
+	if r := []rune(msg); len(r) > 120 {
+		msg = string(r[:120]) + "…"
 	}
 	return name + ": " + msg
 }
@@ -554,7 +589,7 @@ func friendlyError(err error, bot config.Bot, m *Manager) string {
 		return creditsHelp(err)
 	case errors.Is(err, provider.ErrNoKey):
 		return "🔑 " + err.Error() + "\n\nBuka **Settings → Provider**, tempel API key untuk provider ini (atau pakai tombol “Uji key”)."
-	case errors.Is(err, engine.ErrTimeout):
+	case errors.Is(err, engine.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		return "⏱️ Turn dihentikan karena melewati batas waktu. Naikkan `timeoutSec` di Settings."
 	case errors.Is(err, context.Canceled):
 		return "⏹️ Turn dihentikan."

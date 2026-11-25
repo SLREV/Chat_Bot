@@ -30,42 +30,48 @@ func doctorRun(try bool) int {
 	fmt.Printf("OpenMausBot doctor · %s/%s · %s\n\n", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
 	problems := 0
+	fatal := 0
 
 	// 1. data directory
 	dir := config.DataDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		line("✗", "data dir", dir+" tidak bisa dibuat: "+err.Error())
 		problems++
+		fatal++
 	} else {
 		probe := filepath.Join(dir, ".probe")
 		if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
 			line("✗", "data dir", dir+" tidak bisa ditulis: "+err.Error())
 			problems++
+			fatal++
 		} else {
 			_ = os.Remove(probe)
 			line("✓", "data dir", dir)
 		}
 	}
 
-	// 2. port
+	// 2. port & 3. agent CLIs
 	cfg, err := config.Load()
-	if err == nil {
+	if err != nil {
+		line("✗", "config", err.Error())
+		problems++
+		fatal++
+	} else {
 		if free, detail := portFree(cfg.BindAddr, cfg.Port); free {
 			line("✓", "port", fmt.Sprintf("%s:%d siap dipakai", cfg.BindAddr, cfg.Port))
 		} else {
 			line("!", "port", fmt.Sprintf("%s:%d %s — pakai --port %d", cfg.BindAddr, cfg.Port, detail, cfg.Port+1))
 		}
-	}
 
-	// 3. agent CLIs
-	for _, e := range cfg.Engines {
-		if e.CLI == "" {
-			continue
-		}
-		if path, err := exec.LookPath(e.CLI); err == nil {
-			line("✓", "engine "+e.ID, path)
-		} else {
-			line("·", "engine "+e.ID, "tidak terpasang (opsional; pakai provider API key sebagai gantinya)")
+		for _, e := range cfg.EnginesSnapshot() {
+			if e.CLI == "" {
+				continue
+			}
+			if path, err := exec.LookPath(e.CLI); err == nil {
+				line("✓", "engine "+e.ID, path)
+			} else {
+				line("·", "engine "+e.ID, "tidak terpasang (opsional; pakai provider API key sebagai gantinya)")
+			}
 		}
 	}
 
@@ -106,7 +112,7 @@ func doctorRun(try bool) int {
 
 	if try {
 		if len(liveProbe(provs)) > 0 {
-			problems = 0 // ada jalur yang hidup; key yang kosong itu opsional
+			problems = fatal // ada jalur yang hidup; hanya masalah fatal (data dir/config) yang tetap gagal
 		}
 	}
 
@@ -219,8 +225,8 @@ func shortNote(err error) string {
 		return "tidak bisa dihubungi — cek Base URL / server lokal"
 	}
 	msg := err.Error()
-	if len(msg) > 110 {
-		msg = msg[:110] + "…"
+	if r := []rune(msg); len(r) > 110 {
+		msg = string(r[:110]) + "…"
 	}
 	return msg
 }
@@ -247,8 +253,15 @@ func portFree(bind string, port int) (bool, string) {
 		_ = ln.Close()
 		return true, ""
 	}
+	dialHost := bind
+	switch dialHost {
+	case "", "0.0.0.0":
+		dialHost = "127.0.0.1"
+	case "::":
+		dialHost = "::1"
+	}
 	// Something else is using it — is it us?
-	conn, derr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond)
+	conn, derr := net.DialTimeout("tcp", net.JoinHostPort(dialHost, strconv.Itoa(port)), 500*time.Millisecond)
 	if derr == nil {
 		_ = conn.Close()
 		return false, "sudah dipakai (mungkin OpenMausBot yang lain sudah jalan)"

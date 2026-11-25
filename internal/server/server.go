@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/milind-soni/openmausbot-go/internal/agent"
@@ -24,13 +26,15 @@ var webFS embed.FS
 
 // Server holds everything one running instance needs.
 type Server struct {
-	cfg   *config.Settings
-	provs *config.Providers
-	st    *store.Store
-	mgr   *agent.Manager
-	hub   *hub
-	bind  string
-	port  int
+	cfg     *config.Settings
+	provs   *config.Providers
+	st      *store.Store
+	mgr     *agent.Manager
+	hub     *hub
+	bind    string
+	port    int
+	mu      sync.Mutex
+	httpSrv *http.Server
 }
 
 // New builds a server.
@@ -98,7 +102,21 @@ func (s *Server) Listen() error {
 		IdleTimeout:       120 * time.Second,
 		// No WriteTimeout: the SSE stream is long-lived by design.
 	}
+	s.mu.Lock()
+	s.httpSrv = srv
+	s.mu.Unlock()
 	return srv.Serve(ln)
+}
+
+// Shutdown gracefully stops the HTTP listener.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	srv := s.httpSrv
+	s.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
 
 // URL is the address the UI is served on.
@@ -195,7 +213,7 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"version":   Version,
 		"bots":      s.botViews(),
-		"engines":   s.cfg.Engines,
+		"engines":   s.cfg.EnginesSnapshot(),
 		"providers": s.providerViews(r),
 		"threads":   s.st.Threads(),
 		"settings":  s.publicSettings(),
@@ -204,11 +222,12 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) publicSettings() map[string]any {
+	bindAddr, port, autoApprove, timeoutSec := s.cfg.Runtime()
 	return map[string]any{
-		"bindAddr":    s.cfg.BindAddr,
-		"port":        s.cfg.Port,
-		"autoApprove": s.cfg.AutoApprove,
-		"timeoutSec":  s.cfg.TimeoutSec,
+		"bindAddr":    bindAddr,
+		"port":        port,
+		"autoApprove": autoApprove,
+		"timeoutSec":  timeoutSec,
 		"dataDir":     config.DataDir(),
 	}
 }
@@ -257,49 +276,42 @@ func (s *Server) updateBot(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "body bukan JSON yang valid")
 		return
 	}
-	var found config.Bot
-	ok := false
-	for _, b := range s.cfg.Snapshot() {
-		if b.ID == id {
-			found, ok = b, true
-			break
+	found, ok := s.cfg.UpdateBot(id, func(b *config.Bot) {
+		if patch.Name != "" {
+			b.Name = patch.Name
 		}
-	}
+		if patch.Emoji != "" {
+			b.Emoji = patch.Emoji
+		}
+		// Avatar may be cleared on purpose, so an explicit "__none__" is honoured.
+		switch patch.Avatar {
+		case "":
+			// leave unchanged
+		case "__none__":
+			b.Avatar = ""
+		default:
+			b.Avatar = patch.Avatar
+		}
+		if patch.Color != "" {
+			b.Color = patch.Color
+		}
+		if patch.Engine != "" {
+			b.Engine = patch.Engine
+		}
+		if patch.Model != "" {
+			b.Model = patch.Model
+		}
+		if patch.Personality != "" {
+			b.Personality = patch.Personality
+		}
+		if patch.Workdir != "" {
+			b.Workdir = patch.Workdir
+		}
+	})
 	if !ok {
 		writeErr(w, 404, "bot tidak ditemukan")
 		return
 	}
-	if patch.Name != "" {
-		found.Name = patch.Name
-	}
-	if patch.Emoji != "" {
-		found.Emoji = patch.Emoji
-	}
-	// Avatar may be cleared on purpose, so an explicit "__none__" is honoured.
-	switch patch.Avatar {
-	case "":
-		// leave unchanged
-	case "__none__":
-		found.Avatar = ""
-	default:
-		found.Avatar = patch.Avatar
-	}
-	if patch.Color != "" {
-		found.Color = patch.Color
-	}
-	if patch.Engine != "" {
-		found.Engine = patch.Engine
-	}
-	if patch.Model != "" {
-		found.Model = patch.Model
-	}
-	if patch.Personality != "" {
-		found.Personality = patch.Personality
-	}
-	if patch.Workdir != "" {
-		found.Workdir = patch.Workdir
-	}
-	s.cfg.UpsertBot(found)
 	if err := s.cfg.Save(); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -372,7 +384,7 @@ func (s *Server) engines(w http.ResponseWriter, _ *http.Request) {
 		Found bool `json:"found"`
 	}
 	out := []ev{}
-	for _, e := range s.cfg.Engines {
+	for _, e := range s.cfg.EnginesSnapshot() {
 		out = append(out, ev{Engine: e, Found: e.CLI == "" || lookPath(e.CLI)})
 	}
 	writeJSON(w, 200, out)
@@ -391,12 +403,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "body bukan JSON yang valid")
 		return
 	}
-	if in.AutoApprove != nil {
-		s.cfg.AutoApprove = *in.AutoApprove
-	}
-	if in.TimeoutSec != nil && *in.TimeoutSec > 0 {
-		s.cfg.TimeoutSec = *in.TimeoutSec
-	}
+	s.cfg.UpdateRuntime(in.AutoApprove, in.TimeoutSec)
 	if err := s.cfg.Save(); err != nil {
 		writeErr(w, 500, err.Error())
 		return

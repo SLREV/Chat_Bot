@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -42,8 +44,8 @@ func keysCommand(args []string) int {
 		return 0
 
 	case "use":
-		// omb use <provider-id> [model] — set the provider for every bot that
-		// currently points at a dead one, without opening the browser.
+		// omb use <provider-id> [model] — point every bot at the chosen provider
+		// without opening the browser.
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "pakai: omb use <provider-id> [model]")
 			return 2
@@ -57,11 +59,11 @@ func keysCommand(args []string) int {
 		model := pr.DefaultModel
 		if len(args) > 2 {
 			model = args[2]
-		} else if len(pr.Models) > 0 {
+		} else if model == "" && len(pr.Models) > 0 {
 			model = pr.Models[0]
 		}
 		if strings.TrimSpace(model) == "" {
-			fmt.Fprintf(os.Stderr, "%s belum punya model — jalankan `omb check --fix` atau isi daftar model dulu\n", pr.Name)
+			fmt.Fprintf(os.Stderr, "%s belum punya model — jalankan `omb check` atau isi daftar model dulu\n", pr.Name)
 			return 1
 		}
 		cfg, err := config.Load()
@@ -71,9 +73,10 @@ func keysCommand(args []string) int {
 		}
 		n := 0
 		for _, b := range cfg.Snapshot() {
-			b.Engine = pr.ID
-			b.Model = model
-			cfg.UpsertBot(b)
+			cfg.UpdateBot(b.ID, func(bot *config.Bot) {
+				bot.Engine = pr.ID
+				bot.Model = model
+			})
 			n++
 		}
 		if err := cfg.Save(); err != nil {
@@ -92,11 +95,21 @@ func keysCommand(args []string) int {
 		pr, ok := provs.ByID(id)
 		if !ok {
 			// Allow a unique prefix, so "openai" can address "openai-<suffix>".
+			var matches []config.Provider
 			for _, p := range provs.List() {
 				if strings.HasPrefix(p.ID, id) {
-					pr, ok = p, true
-					break
+					matches = append(matches, p)
 				}
+			}
+			if len(matches) == 1 {
+				pr, ok = matches[0], true
+			} else if len(matches) > 1 {
+				ids := make([]string, len(matches))
+				for i, m := range matches {
+					ids[i] = m.ID
+				}
+				fmt.Fprintf(os.Stderr, "prefix %q cocok dengan beberapa provider: %s\n", id, strings.Join(ids, ", "))
+				return 1
 			}
 		}
 		if !ok {
@@ -177,10 +190,10 @@ func readAllStdin() (string, error) {
 			b.Write(buf[:n])
 		}
 		if err != nil {
-			if err.Error() == "EOF" {
+			if errors.Is(err, io.EOF) {
 				break
 			}
-			return b.String(), nil
+			return b.String(), err
 		}
 	}
 	return b.String(), nil

@@ -139,6 +139,77 @@ func (s *Settings) Snapshot() []Bot {
 	return out
 }
 
+// BotByID returns a copy of a single bot by id.
+func (s *Settings) BotByID(id string) (Bot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.Bots {
+		if b.ID == id {
+			return b, true
+		}
+	}
+	return Bot{}, false
+}
+
+// UpdateBot atomically applies fn to the matching bot under lock.
+func (s *Settings) UpdateBot(id string, fn func(*Bot)) (Bot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.Bots {
+		if s.Bots[i].ID == id {
+			fn(&s.Bots[i])
+			return s.Bots[i], true
+		}
+	}
+	return Bot{}, false
+}
+
+// EnginesSnapshot returns a copy of the configured engines.
+func (s *Settings) EnginesSnapshot() []Engine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Engine, len(s.Engines))
+	for i, e := range s.Engines {
+		if len(e.Args) > 0 {
+			args := make([]string, len(e.Args))
+			copy(args, e.Args)
+			e.Args = args
+		}
+		out[i] = e
+	}
+	return out
+}
+
+// Runtime returns a thread-safe snapshot of scalar runtime settings.
+func (s *Settings) Runtime() (bindAddr string, port int, autoApprove bool, timeoutSec int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.BindAddr, s.Port, s.AutoApprove, s.TimeoutSec
+}
+
+// UpdateRuntime updates scalar runtime settings under lock.
+func (s *Settings) UpdateRuntime(autoApprove *bool, timeoutSec *int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if autoApprove != nil {
+		s.AutoApprove = *autoApprove
+	}
+	if timeoutSec != nil && *timeoutSec > 0 {
+		s.TimeoutSec = *timeoutSec
+	}
+}
+
+// Timeout returns the configured per-turn timeout as a Duration.
+func (s *Settings) Timeout() time.Duration {
+	s.mu.Lock()
+	sec := s.TimeoutSec
+	s.mu.Unlock()
+	if sec <= 0 {
+		sec = 600
+	}
+	return time.Duration(sec) * time.Second
+}
+
 // EngineByID looks an engine up.
 func (s *Settings) EngineByID(id string) (Engine, bool) {
 	s.mu.Lock()
