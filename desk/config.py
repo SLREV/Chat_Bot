@@ -11,6 +11,8 @@ DATA_DIR = Path(os.environ.get("DESK_DATA_DIR", str(BASE_DIR / "data")))
 # Mode & execution safety
 PAPER = True  # Paper mode first; never places real on-chain orders here.
 MODEL = os.environ.get("DESK_GROK_MODEL", "grok-4.7")
+DASHBOARD_BIND = os.environ.get("DESK_BIND", "127.0.0.1")
+DASHBOARD_PORT = int(os.environ.get("DESK_PORT", "8788"))
 
 # Capital & sizing (matching strict RM desk rules)
 EQUITY_START_USD = 150.0
@@ -64,3 +66,4 @@ STATE_FILE = DATA_DIR / "state.json"
 SEEN_FILE = DATA_DIR / "seen.txt"
 STOP_FILE = DATA_DIR / "STOP"
 HEALTH_FILE = DATA_DIR / "health.json"
+TOKEN_FILE = DATA_DIR / ".auth_token"

@@ -17,11 +17,14 @@ Implementasi ringan (Python 3 stdlib saja, **0 dependensi pip**) dari desk 6 age
 # 1. Jalankan 1 pass uji offline (demo)
 python3 desk/crew.py --once --mode demo
 
-# 2. Jalankan dashboard ringan + background loop 6 agen (http://0.0.0.0:8788)
+# 2. Jalankan dashboard ringan + background loop 6 agen (default 127.0.0.1:8788 + token auth)
 python3 desk/dashboard.py --run-crew --mode demo --port 8788
 
 # 3. Mode live (DexScreener + Rugcheck + Jupiter quote, tetap paper fill)
 python3 desk/dashboard.py --run-crew --mode live --port 8788
+
+# Opsional: set token statis atau bind ke interface tertentu (gunakan hanya di jaringan tepercaya / di balik reverse proxy TLS)
+DESK_AUTH_TOKEN=rahasia-anda python3 desk/dashboard.py --run-crew --bind 127.0.0.1 --port 8788
 
 # 4. Kontrol darurat
 python3 desk/crew.py --stop

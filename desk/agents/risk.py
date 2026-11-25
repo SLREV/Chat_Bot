@@ -87,7 +87,7 @@ def monitor_positions(
         if gain_pct <= float(pos["stop_pct"]):
             why = "hard stop -6%" if float(pos["stop_pct"]) < 0 else f"trail stop +{float(pos['stop_pct']):.0f}%"
             to_close.append((mint, why, gain_pct))
-        elif age_hours >= config.MAX_HOLD_HOURS and float(pos["stop_pct"]) < 0:
+        elif age_hours >= config.MAX_HOLD_HOURS:
             to_close.append((mint, f"max hold {config.MAX_HOLD_HOURS:.0f}h", gain_pct))
 
     for mint, why, gain_pct in to_close:
