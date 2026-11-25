@@ -3,7 +3,7 @@ VERSION  ?= 0.6.6
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 GOFLAGS  := CGO_ENABLED=0
 
-.PHONY: all build run test vet fmt clean dist size
+.PHONY: all build run test vet fmt clean dist size desk desk-demo
 
 all: build
 
@@ -51,6 +51,15 @@ win: dist
 	cd dist && zip -r -q openmausbot-windows-x64.zip openmausbot-windows-x64
 	@ls -lh dist/openmausbot-windows-x64.zip
 	@echo "Isi: omb.exe + omb.cmd + README-WINDOWS.txt (klik dua kali omb.exe)"
+
+## desk: jalankan dashboard + 6-agent crew (mode demo default, override MODE=live)
+desk:
+	python3 desk/dashboard.py --run-crew --mode $(or $(MODE),demo) --port 8788
+
+## desk-demo: satu pass demo + unit test 6-agent desk
+desk-demo:
+	python3 -m unittest discover -s desk/tests -v
+	python3 desk/crew.py --once --mode demo
 
 clean:
 	rm -rf bin dist
