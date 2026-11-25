@@ -1,4 +1,11 @@
-"""Agent 5: Risk — enforces -6% stop, trailing stop, take-half, and -15% day stop."""
+"""Agent 5: Risk — enforces -6% stop, trailing stop, take-half, 4h max hold, and -15% day stop.
+
+Mendukung dua jalur eksekusi:
+- Paper (Tahap 1): menghitung PnL secara internal di `book.json`.
+- Live on-chain (Tahap 3): ketika `pos["execution"] == "live"`, TAKE-HALF (50%)
+  dan EXIT (100%) mengeksekusi swap balik Token -> USDC melalui `wallet.execute_swap`.
+  Jika transaksi jual gagal, posisi TIDAK dihapus dari `book["open"]` agar tetap terpantau.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,7 @@ import time
 from typing import Any
 
 import config
-from agents import fetch_json
+from agents import fetch_json, wallet
 from agents.executor import equity_of, save_book
 
 
@@ -32,12 +39,44 @@ def _trail_stop_for(peak_pct: float, current_stop: float) -> float:
     return floor
 
 
+def _sell_live_fraction(
+    mint: str,
+    pos: dict[str, Any],
+    fraction: float,
+) -> tuple[bool, float, str | None, str]:
+    """Jual sebagian (0.5) atau seluruh (1.0) saldo token posisi live ke USDC on-chain."""
+    armed, guard_msg = config.is_live_execution_armed()
+    if not armed:
+        return False, 0.0, None, f"live sell blocked: {guard_msg}"
+
+    raw_bal = int(pos.get("token_amount_raw") or 0)
+    if raw_bal <= 0:
+        try:
+            pub = wallet.wallet_pubkey()
+            raw_bal, _ = wallet.get_token_balance_raw(pub, mint)
+        except Exception as exc:
+            return False, 0.0, None, f"gagal baca saldo token: {exc}"
+
+    if raw_bal <= 0:
+        return False, 0.0, None, "saldo token on-chain sudah 0"
+
+    sell_raw = raw_bal if fraction >= 0.999 else max(1, int(raw_bal * fraction))
+    swap = wallet.execute_swap(mint, config.USDC_MINT, sell_raw, dry_run=False)
+    if not swap.get("ok") or not swap.get("tx_sig"):
+        return False, 0.0, None, str(swap.get("err") or "swap jual gagal")
+
+    pos["token_amount_raw"] = max(0, raw_bal - sell_raw)
+    pos["exit_failures"] = 0
+    proceeds_usd = round(int(swap.get("out_amount_raw") or 0) / 1_000_000.0, 4)
+    return True, proceeds_usd, str(swap["tx_sig"]), "ok"
+
+
 def monitor_positions(
     book: dict[str, Any],
     mode: str = "demo",
     rng: random.Random | None = None,
 ) -> list[dict[str, Any]]:
-    """Evaluate all open positions and apply stops / take-profit / day breaker."""
+    """Evaluasi semua posisi terbuka dan terapkan stop, take-half, max hold, & day breaker."""
     events: list[dict[str, Any]] = []
     now = time.time()
     r = rng or random
@@ -52,12 +91,12 @@ def monitor_positions(
         entry = float(pos["entry_price"])
         last = float(pos.get("last_price", entry))
 
-        if mode == "live":
+        if mode == "live" or pos.get("execution") == "live":
             px = _live_price(mint)
             if px is not None:
                 last = px
         else:
-            # Gentle random walk biased slightly positive for high-score entries
+            # Simulasi pergerakan harga di mode demo offline
             step = r.uniform(-0.075, 0.095)
             last = max(0.000001, round(last * (1.0 + step), 6))
 
@@ -67,22 +106,46 @@ def monitor_positions(
         pos["stop_pct"] = _trail_stop_for(pos["peak_pct"], float(pos.get("stop_pct", config.STOP_PCT)))
         pos["current_usd"] = round(float(pos["usd"]) * (1.0 + gain_pct / 100.0), 4)
 
-        # Take half at +100%
+        # TAKE-HALF pada +100%
         if not pos.get("half_taken") and gain_pct >= config.TAKE_HALF_AT_PCT:
-            half_proceeds = round(pos["current_usd"] * 0.5, 4)
             half_cost = round(float(pos["usd"]) * 0.5, 4)
-            book["cash"] = round(float(book["cash"]) + half_proceeds, 4)
-            book["realized_pnl"] = round(float(book.get("realized_pnl", 0.0)) + (half_proceeds - half_cost), 4)
-            pos["usd"] = round(float(pos["usd"]) - half_cost, 4)
-            pos["current_usd"] = round(pos["current_usd"] - half_proceeds, 4)
-            pos["half_taken"] = True
-            events.append({
-                "agent": "RISK",
-                "level": "ok",
-                "symbol": pos["symbol"],
-                "msg": f"TAKE-HALF ${pos['symbol']} +{gain_pct:.1f}% (+${half_proceeds - half_cost:.2f})",
-            })
+            if pos.get("execution") == "live":
+                ok_sell, proceeds, tx_sig, err_msg = _sell_live_fraction(mint, pos, 0.5)
+                if not ok_sell:
+                    events.append({
+                        "agent": "RISK",
+                        "level": "err",
+                        "symbol": pos["symbol"],
+                        "msg": f"LIVE TAKE-HALF GAGAL ${pos['symbol']}: {err_msg}",
+                    })
+                else:
+                    book["cash"] = round(float(book["cash"]) + proceeds, 4)
+                    book["realized_pnl"] = round(float(book.get("realized_pnl", 0.0)) + (proceeds - half_cost), 4)
+                    pos["usd"] = round(float(pos["usd"]) - half_cost, 4)
+                    pos["current_usd"] = round(float(pos["current_usd"]) * 0.5, 4)
+                    pos["half_taken"] = True
+                    pos["half_tx_sig"] = tx_sig
+                    events.append({
+                        "agent": "RISK",
+                        "level": "ok",
+                        "symbol": pos["symbol"],
+                        "msg": f"LIVE TAKE-HALF ${pos['symbol']} +{gain_pct:.1f}% tx={str(tx_sig)[:10]}…",
+                    })
+            else:
+                half_proceeds = round(pos["current_usd"] * 0.5, 4)
+                book["cash"] = round(float(book["cash"]) + half_proceeds, 4)
+                book["realized_pnl"] = round(float(book.get("realized_pnl", 0.0)) + (half_proceeds - half_cost), 4)
+                pos["usd"] = round(float(pos["usd"]) - half_cost, 4)
+                pos["current_usd"] = round(pos["current_usd"] - half_proceeds, 4)
+                pos["half_taken"] = True
+                events.append({
+                    "agent": "RISK",
+                    "level": "ok",
+                    "symbol": pos["symbol"],
+                    "msg": f"TAKE-HALF ${pos['symbol']} +{gain_pct:.1f}% (+${half_proceeds - half_cost:.2f})",
+                })
 
+        # Evaluasi EXIT: hard stop -6%, trailing stop, atau batas waktu 4 jam (tanpa syarat stop < 0)
         age_hours = (now - float(pos.get("opened_at", now))) / 3600.0
         if gain_pct <= float(pos["stop_pct"]):
             why = "hard stop -6%" if float(pos["stop_pct"]) < 0 else f"trail stop +{float(pos['stop_pct']):.0f}%"
@@ -91,9 +154,44 @@ def monitor_positions(
             to_close.append((mint, f"max hold {config.MAX_HOLD_HOURS:.0f}h", gain_pct))
 
     for mint, why, gain_pct in to_close:
-        pos = book["open"].pop(mint)
-        proceeds = float(pos["current_usd"])
-        pnl = round(proceeds - float(pos["usd"]), 4)
+        pos = book["open"].get(mint)
+        if not pos:
+            continue
+
+        if pos.get("execution") == "live":
+            ok_sell, proceeds, tx_sig, err_msg = _sell_live_fraction(mint, pos, 1.0)
+            if not ok_sell:
+                # JANGAN hapus posisi live jika transaksi jual on-chain gagal!
+                fails = int(pos.get("exit_failures", 0)) + 1
+                pos["exit_failures"] = fails
+                events.append({
+                    "agent": "RISK",
+                    "level": "err",
+                    "symbol": pos["symbol"],
+                    "msg": f"LIVE EXIT GAGAL #{fails} ${pos['symbol']} ({why}): {err_msg}",
+                })
+                if fails >= 3 and not config.STOP_FILE.exists():
+                    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                    config.STOP_FILE.write_text(
+                        f"Live exit gagal 3x untuk {pos['symbol']}: {err_msg}\n",
+                        encoding="utf-8",
+                    )
+                    events.append({
+                        "agent": "RISK",
+                        "level": "err",
+                        "symbol": "DESK",
+                        "msg": "LIVE EXIT gagal 3x — STOP file ditulis otomatis",
+                    })
+                continue
+            book["open"].pop(mint)
+            pnl = round(proceeds - float(pos["usd"]), 4)
+            tx_note = f" tx={str(tx_sig)[:10]}…"
+        else:
+            book["open"].pop(mint)
+            proceeds = float(pos["current_usd"])
+            pnl = round(proceeds - float(pos["usd"]), 4)
+            tx_note = ""
+
         book["cash"] = round(float(book["cash"]) + proceeds, 4)
         book["realized_pnl"] = round(float(book.get("realized_pnl", 0.0)) + pnl, 4)
         if pnl > 0:
@@ -102,10 +200,10 @@ def monitor_positions(
             "agent": "RISK",
             "level": "ok" if pnl >= 0 else "warn",
             "symbol": pos["symbol"],
-            "msg": f"EXIT ${pos['symbol']} ({why}) {gain_pct:+.1f}% ({pnl:+.2f}$)",
+            "msg": f"EXIT ${pos['symbol']} ({why}) {gain_pct:+.1f}% ({pnl:+.2f}$){tx_note}",
         })
 
-    # Daily drawdown circuit breaker
+    # Circuit breaker drawdown harian (-15%)
     eq = equity_of(book)
     day_start = float(book.get("day_start_equity") or config.EQUITY_START_USD)
     if day_start > 0:

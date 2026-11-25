@@ -25,7 +25,7 @@ if str(DESK_DIR) not in sys.path:
 
 import config  # noqa: E402
 import crew  # noqa: E402
-from agents import logger_agent  # noqa: E402
+from agents import executor, logger_agent  # noqa: E402
 
 _MODE_LOCK = threading.Lock()
 _RUNTIME = {"mode": "demo", "grok": False, "interval": 6.0, "crew_running": False}
@@ -218,7 +218,8 @@ HTML = r"""<!doctype html>
     $("#liveBadge").className = "dot-live" + (stopped ? " paused" : "");
     $("#liveTxt").textContent = stopped ? "Paused (STOP)" : "Live";
     $("#stopBtn").textContent = stopped ? "▶ Resume" : "⏸ Stop";
-    $("#modeTag").textContent = "· " + (st.paper ? "paper" : "live") + " · " + (st.mode || "demo");
+    const execLabel = st.live_armed ? `LIVE ON-CHAIN (cap $${Number(st.max_live_trade_usd||5).toFixed(0)})` : (st.paper ? "paper" : "live-locked");
+    $("#modeTag").textContent = "· " + execLabel + " · " + (st.mode || "demo");
     $("#modeBtn").textContent = "Mode: " + ((st.mode||"demo") === "live" ? "Live" : "Demo");
 
     const eq = Number(st.equity_usd || 0);
@@ -251,12 +252,15 @@ HTML = r"""<!doctype html>
     const open = st.open_positions || [];
     $("#posCard").style.display = open.length ? "block" : "none";
     $("#posCount").textContent = `${open.length} open`;
-    $("#posList").innerHTML = open.map(p=>
-      `<div class="pos-row">
-        <div><b>$${esc(p.symbol)}</b> <span class="muted">score ${p.score} · stop ${p.stop_pct}%</span></div>
+    const isB58 = (s)=>typeof s==="string" && /^[1-9A-HJ-NP-Za-km-z]{32,100}$/.test(s);
+    $("#posList").innerHTML = open.map(p=>{
+      const txHtml = isB58(p.tx_sig) ? ` · <a href="https://solscan.io/tx/${esc(p.tx_sig)}" target="_blank" rel="noopener noreferrer" style="color:var(--blue)">tx</a>` : "";
+      const exTag = p.execution==="live" ? "LIVE" : "paper";
+      return `<div class="pos-row">
+        <div><b>$${esc(p.symbol)}</b> <span class="muted">[${exTag}] score ${p.score} · stop ${p.stop_pct}%${txHtml}</span></div>
         <div>$${Number(p.current_usd).toFixed(2)} <span class="${p.gain_pct>=0?"pos":"neg"}">${p.gain_pct>=0?"+":""}${Number(p.gain_pct).toFixed(1)}%</span></div>
-      </div>`
-    ).join("");
+      </div>`;
+    }).join("");
 
     const logs = (st.logs || []).slice(0, 30);
     $("#logs").innerHTML = logs.length ? logs.map(l=>{
@@ -636,6 +640,12 @@ class DeskHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/reset":
+            # Jangan izinkan reset dari dashboard bila masih ada posisi live on-chain terbuka
+            book = executor.load_book()
+            live_open = [p for p in book.get("open", {}).values() if p.get("execution") == "live" and int(p.get("token_amount_raw") or 0) > 0]
+            if live_open:
+                self._send_json(409, {"error": "cannot reset while live on-chain positions remain open"})
+                return
             with _MODE_LOCK:
                 mode = str(_RUNTIME["mode"])
             st = crew.reset_desk(mode=mode)

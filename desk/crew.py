@@ -6,6 +6,8 @@ Scout -> Filter -> Analyst -> Executor -> Risk -> Logger.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import threading
 import time
@@ -18,7 +20,7 @@ if str(DESK_DIR) not in sys.path:
     sys.path.insert(0, str(DESK_DIR))
 
 import config  # noqa: E402
-from agents import analyst, executor, filter_agent, logger_agent, risk, scout  # noqa: E402
+from agents import analyst, executor, filter_agent, logger_agent, risk, scout, wallet  # noqa: E402
 
 _PASS_LOCK = threading.Lock()
 
@@ -63,12 +65,66 @@ def reset_desk(mode: str = "demo") -> dict[str, Any]:
         return state
 
 
+def reconcile_live_positions(book: dict[str, Any], state: dict[str, Any]) -> None:
+    """Sinkronkan posisi live di `book.json` dengan saldo SPL token riil di wallet."""
+    live_mints = [m for m, p in book.get("open", {}).items() if p.get("execution") == "live"]
+    if not live_mints:
+        return
+    armed, _ = config.is_live_execution_armed()
+    if not armed:
+        return
+    try:
+        pub = wallet.wallet_pubkey()
+    except Exception:
+        return
+
+    changed = False
+    for mint in live_mints:
+        pos = book["open"].get(mint)
+        if not pos:
+            continue
+        try:
+            raw_bal, _ = wallet.get_token_balance_raw(pub, mint)
+        except Exception:
+            continue
+        if raw_bal <= 0:
+            sym = pos.get("symbol", mint[:6])
+            book["open"].pop(mint, None)
+            _push_log(state, "RISK", "warn", sym, f"RECONCILE ${sym}: saldo on-chain 0 (eksternal exit), dihapus dari book")
+            changed = True
+        elif int(pos.get("token_amount_raw") or 0) != raw_bal:
+            pos["token_amount_raw"] = raw_bal
+            changed = True
+    if changed:
+        executor.save_book(book)
+
+
+def doctor_report() -> dict[str, Any]:
+    """Cek kesiapan portabel untuk Tahap 1 (paper), Tahap 2 (simulate), & Tahap 3 (live)."""
+    armed, guard_msg = config.is_live_execution_armed()
+    rpc_ok = bool(os.environ.get("SOLANA_RPC_URL", config.SOLANA_RPC_URL).strip())
+    solders_ok = wallet.has_solders()
+    key_ok = bool(os.environ.get("SOLANA_PRIVATE_KEY", "").strip())
+    return {
+        "stage1_paper_live_feed": True,
+        "stage2_rpc_configured": rpc_ok,
+        "stage3_solders_installed": solders_ok,
+        "stage3_private_key_set": key_ok,
+        "stage3_live_armed": armed,
+        "stage3_guard_detail": guard_msg,
+        "paper": config.PAPER,
+        "max_live_trade_usd": config.MAX_LIVE_TRADE_USD,
+        "slippage_bps": config.SLIPPAGE_BPS,
+    }
+
+
 def run_pass(mode: str = "demo", use_grok: bool = False) -> dict[str, Any]:
     with _PASS_LOCK:
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
         state = logger_agent.load_state()
         state["mode"] = mode
         book = executor.load_book()
+        reconcile_live_positions(book, state)
         seen = _load_seen()
 
         # 1. SCOUT
@@ -207,9 +263,27 @@ def main() -> int:
     parser.add_argument("--stop", action="store_true", help="write STOP file to pause new entries")
     parser.add_argument("--resume", action="store_true", help="remove STOP file")
     parser.add_argument("--reset", action="store_true", help="reset paper book and logs")
+    parser.add_argument("--doctor", action="store_true", help="cek kesiapan Tahap 1, Tahap 2 (simulate), & Tahap 3 (live)")
+    parser.add_argument("--simulate", metavar="MINT", help="Tahap 2: dry-run Jupiter swap + Solana simulateTransaction untuk token MINT")
+    parser.add_argument("--usd", type=float, default=2.0, help="ukuran USD untuk --simulate (default $2.0)")
+    parser.add_argument("--pubkey", default="", help="pubkey Solana opsional untuk --simulate (atau baca SOLANA_PUBLIC_KEY)")
     args = parser.parse_args()
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if args.doctor:
+        print(json.dumps(doctor_report(), indent=2))
+        return 0
+    if args.simulate:
+        pub = args.pubkey.strip() or os.environ.get("SOLANA_PUBLIC_KEY", "").strip()
+        if not pub:
+            try:
+                pub = wallet.wallet_pubkey()
+            except Exception as exc:
+                print(f"Error: sertakan --pubkey atau SOLANA_PUBLIC_KEY ({exc})")
+                return 2
+        res = wallet.dry_run_swap_plan(config.USDC_MINT, args.simulate.strip(), int(max(1.0, args.usd) * 1_000_000), pub)
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
     if args.stop:
         config.STOP_FILE.write_text("Manual STOP\n", encoding="utf-8")
         print("STOP file written: new entries paused.")

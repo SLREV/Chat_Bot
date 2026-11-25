@@ -12,6 +12,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 DESK_DIR = Path(__file__).resolve().parent.parent
 if str(DESK_DIR) not in sys.path:
@@ -20,7 +21,7 @@ if str(DESK_DIR) not in sys.path:
 import config  # noqa: E402
 import crew  # noqa: E402
 import dashboard  # noqa: E402
-from agents import analyst, executor, filter_agent, risk  # noqa: E402
+from agents import analyst, executor, filter_agent, risk, wallet  # noqa: E402
 
 
 def _clean_facts(**overrides):
@@ -229,6 +230,101 @@ class DeskTestCase(unittest.TestCase):
         self.assertGreater(st["scanned"], 0)
         saved = json.loads(config.STATE_FILE.read_text(encoding="utf-8"))
         self.assertEqual(set(saved["agents"].keys()), {"scout", "filter", "analyst", "executor", "risk", "logger"})
+
+    def test_stage2_dry_run_simulate_transaction_without_private_key(self) -> None:
+        with mock.patch.object(wallet, "fetch_json", return_value={"inAmount": "2000000", "outAmount": "5000000", "priceImpactPct": "0.12"}):
+            with mock.patch.object(
+                wallet,
+                "post_json",
+                side_effect=[
+                    {"swapTransaction": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},
+                    {"jsonrpc": "2.0", "id": 1, "result": {"value": {"err": None, "unitsConsumed": 91234, "logs": ["Program log: OK"]}}},
+                ],
+            ):
+                res = wallet.dry_run_swap_plan(
+                    config.USDC_MINT,
+                    "So11111111111111111111111111111111111111112",
+                    2_000_000,
+                    "11111111111111111111111111111111",
+                    rpc_url="https://rpc.example",
+                )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["out_amount_raw"], 5_000_000)
+        self.assertEqual(res["simulation"]["units_consumed"], 91234)
+
+    def test_stage3_double_lock_and_live_buy_take_half_and_exit(self) -> None:
+        book = executor.load_book()
+        prev_paper = config.PAPER
+        prev_cap = config.MAX_LIVE_TRADE_USD
+        self.addCleanup(lambda: setattr(config, "PAPER", prev_paper))
+        self.addCleanup(lambda: setattr(config, "MAX_LIVE_TRADE_USD", prev_cap))
+
+        # 1) PAPER=False tanpa DESK_LIVE_CONFIRM wajib diblokir
+        config.PAPER = False
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DESK_LIVE_CONFIRM", None)
+            ok, msg, _ = executor.execute_entry(book, "MintLive1", _clean_facts(), 85, mode="live")
+            self.assertFalse(ok)
+            self.assertIn("DESK_LIVE_CONFIRM", msg)
+
+        # 2) Double-lock lengkap -> BUY memakai cap burner wallet ($5) + catat tx_sig & token_amount_raw
+        config.MAX_LIVE_TRADE_USD = 5.0
+        env = {
+            "DESK_LIVE_CONFIRM": config.LIVE_CONFIRM_PHRASE,
+            "SOLANA_RPC_URL": "https://rpc.example",
+            "SOLANA_PRIVATE_KEY": "dummy-key",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch.object(wallet, "wallet_pubkey", return_value="BurnerPub1111111111111111111111111111111111"):
+                with mock.patch.object(wallet, "get_sol_balance", return_value=0.15):
+                    with mock.patch.object(wallet, "get_usdc_balance", return_value=50.0):
+                        with mock.patch.object(wallet, "get_token_balance_raw", side_effect=[(0, 6), (1_000_000_000, 6)]):
+                            with mock.patch.object(
+                                wallet,
+                                "execute_swap",
+                                return_value={"ok": True, "tx_sig": "5LiveBuySig1111111111111111111111111111111111", "out_amount_raw": 1_000_000_000},
+                            ):
+                                ok, msg, pos = executor.execute_entry(book, "MintLive1", _clean_facts(price_usd=1.0), 88, mode="live")
+
+            self.assertTrue(ok, msg)
+            self.assertIsNotNone(pos)
+            self.assertEqual(pos["execution"], "live")
+            self.assertEqual(pos["usd"], 5.0)
+            self.assertEqual(pos["token_amount_raw"], 1_000_000_000)
+
+            # 3) Jika exit gagal, posisi live TIDAK boleh dihapus dari book["open"]
+            with mock.patch.object(risk, "_live_price", return_value=0.90):
+                with mock.patch.object(wallet, "execute_swap", return_value={"ok": False, "err": "rpc timeout"}):
+                    evs_fail = risk.monitor_positions(book, mode="live")
+            self.assertIn("MintLive1", book["open"])
+            self.assertTrue(any("LIVE EXIT GAGAL #1" in e["msg"] for e in evs_fail))
+
+            # 4) TAKE-HALF (+100%) menjual 50% saldo token on-chain
+            with mock.patch.object(risk, "_live_price", return_value=2.10):
+                with mock.patch.object(
+                    wallet,
+                    "execute_swap",
+                    return_value={"ok": True, "tx_sig": "5HalfSig111111111111111111111111111111111111", "out_amount_raw": 5_250_000},
+                ) as swap_half:
+                    evs_half = risk.monitor_positions(book, mode="live")
+            self.assertTrue(swap_half.called)
+            self.assertEqual(swap_half.call_args.args[2], 500_000_000)
+            self.assertTrue(book["open"]["MintLive1"]["half_taken"])
+            self.assertEqual(book["open"]["MintLive1"]["token_amount_raw"], 500_000_000)
+            self.assertTrue(any("LIVE TAKE-HALF" in e["msg"] for e in evs_half))
+
+            # 5) EXIT (trail stop / max hold) menjual 100% sisa token (500_000_000) & menutup posisi
+            book["open"]["MintLive1"]["opened_at"] = time.time() - (config.MAX_HOLD_HOURS * 3600.0 + 60.0)
+            with mock.patch.object(risk, "_live_price", return_value=2.05):
+                with mock.patch.object(
+                    wallet,
+                    "execute_swap",
+                    return_value={"ok": True, "tx_sig": "5ExitSig111111111111111111111111111111111111", "out_amount_raw": 5_100_000},
+                ) as swap_exit:
+                    evs_exit = risk.monitor_positions(book, mode="live")
+            self.assertEqual(swap_exit.call_args.args[2], 500_000_000)
+            self.assertEqual(len(book["open"]), 0)
+            self.assertTrue(any("EXIT $CLEAN" in e["msg"] and "tx=5ExitSig11" in e["msg"] for e in evs_exit))
 
 
 if __name__ == "__main__":
