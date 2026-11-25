@@ -182,8 +182,10 @@ def run_pass(mode: str = "demo", use_grok: bool = False) -> dict[str, Any]:
                         _push_log(state, "RISK", "err", "DESK", "Filter API error streak -> STOP written")
                     continue
 
+            if facts and facts.get("symbol"):
+                sym = str(facts.get("symbol") or sym)
             if facts and facts.get("price_usd"):
-                _push_ticker(state, str(facts.get("symbol", sym)), float(facts["price_usd"]), float(facts.get("h1_change_pct", 0)))
+                _push_ticker(state, sym, float(facts["price_usd"]), float(facts.get("h1_change_pct", 0)))
 
             passed, rule, detail = filter_agent.evaluate(facts)
             if not passed:
