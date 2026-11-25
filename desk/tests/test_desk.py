@@ -121,8 +121,8 @@ class DeskTestCase(unittest.TestCase):
 
     def test_risk_max_hold_closes_even_when_trailing_stop_non_negative(self) -> None:
         book = executor.load_book()
-        executor.execute_entry(book, "MintOldZero", _clean_facts(price_usd=1.0), 82, mode="demo")
-        executor.execute_entry(book, "MintOldPos", _clean_facts(price_usd=1.0), 85, mode="demo")
+        executor.execute_entry(book, "MintOldZero", _clean_facts(symbol="CLEAN1", price_usd=1.0), 82, mode="demo")
+        executor.execute_entry(book, "MintOldPos", _clean_facts(symbol="CLEAN2", price_usd=1.0), 85, mode="demo")
         stale = time.time() - (config.MAX_HOLD_HOURS * 3600.0 + 120.0)
         # Position 1: peaked +15% (stop_pct == 0.0), sitting above stop at +5%
         book["open"]["MintOldZero"]["opened_at"] = stale
@@ -345,6 +345,41 @@ class DeskTestCase(unittest.TestCase):
             self.assertEqual(swap_exit.call_args.args[2], 500_000_000)
             self.assertEqual(len(book["open"]), 0)
             self.assertTrue(any("EXIT $CLEAN" in e["msg"] and "tx=5ExitSig11" in e["msg"] for e in evs_exit))
+
+    def test_demo_soak_bounded_and_no_duplicate_symbols_or_frozen_trail(self) -> None:
+        import random
+
+        book = executor.load_book()
+        # 1) Duplicate symbol across different synthetic mints must be blocked
+        ok1, _, _ = executor.execute_entry(book, "BORKMint1", _clean_facts(symbol="BORK", price_usd=1.0), 82, mode="demo")
+        ok2, msg2, _ = executor.execute_entry(book, "BORKMint2", _clean_facts(symbol="BORK", price_usd=1.0), 95, mode="demo")
+        self.assertTrue(ok1)
+        self.assertFalse(ok2)
+        self.assertIn("BORK", msg2)
+
+        # 2) Dynamic trailing stop above +120% must raise stop floor above +80% and exit on pullback
+        book["open"]["BORKMint1"]["last_price"] = 4.0  # +300%
+        risk.monitor_positions(book, mode="live")
+        self.assertIn("BORKMint1", book["open"])
+        self.assertGreaterEqual(book["open"]["BORKMint1"]["stop_pct"], 220.0)
+        book["open"]["BORKMint1"]["last_price"] = 3.1  # +210%, below 225% dynamic trail
+        evs_trail = risk.monitor_positions(book, mode="live")
+        self.assertEqual(len(book["open"]), 0)
+        self.assertTrue(any("trail stop" in e["msg"] for e in evs_trail))
+
+        # 3) Long demo soak (2,500 passes) must remain bounded (never compounding to trillions)
+        book = executor.load_book()
+        rng = random.Random(42)
+        for i in range(2500):
+            sym = f"T{i % 18}"
+            mint = f"{sym}_{i}"
+            if len(book["open"]) < config.MAX_OPEN_POSITIONS and i % 4 == 0:
+                executor.execute_entry(book, mint, _clean_facts(symbol=sym, price_usd=0.01), 80, mode="demo")
+            risk.monitor_positions(book, mode="demo", rng=rng)
+            if config.STOP_FILE.exists():
+                config.STOP_FILE.unlink()
+        eq = executor.equity_of(book)
+        self.assertLess(eq, 5_000.0)
 
 
 if __name__ == "__main__":
