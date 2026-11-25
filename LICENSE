@@ -1,0 +1,4 @@
+Apache License 2.0 — see https://www.apache.org/licenses/LICENSE-2.0
+
+This Go build is a reimplementation inspired by OpenMausBot
+(https://github.com/milind-soni/OpenMausBot), licensed under Apache 2.0.
