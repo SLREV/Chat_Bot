@@ -82,3 +82,33 @@ func TestTimeoutKillsTheTurn(t *testing.T) {
 		t.Fatalf("timeout did not stop the child promptly: %s", d)
 	}
 }
+
+func TestBuildCLIArgsForGeminiAndOpenCode(t *testing.T) {
+	gemArgs, stdin := buildCLIArgs(Request{
+		Model:  "gemini-2.5-flash",
+		Engine: config.Engine{ID: "gemini-cli", CLI: "gemini", Args: []string{"-p"}, Prompt: "arg"},
+	}, "cek desk")
+	if stdin {
+		t.Fatal("gemini-cli should use arg prompt")
+	}
+	wantGem := "gemini-2.5-flash"
+	if len(gemArgs) != 4 || gemArgs[0] != "--model" || gemArgs[1] != wantGem || gemArgs[2] != "-p" || gemArgs[3] != "cek desk" {
+		t.Fatalf("unexpected gemini args: %#v", gemArgs)
+	}
+
+	ocArgs, _ := buildCLIArgs(Request{
+		Model:  "demo",
+		Engine: config.Engine{ID: "opencode", CLI: "opencode", Args: []string{"run"}, Prompt: "arg"},
+	}, "cek desk")
+	if len(ocArgs) != 2 || ocArgs[0] != "run" || ocArgs[1] != "cek desk" {
+		t.Fatalf("demo model must not be passed to CLI, got: %#v", ocArgs)
+	}
+
+	ocModelArgs, _ := buildCLIArgs(Request{
+		Model:  "google/gemini-2.5-flash",
+		Engine: config.Engine{ID: "opencode", CLI: "opencode", Args: []string{"run"}, Prompt: "arg"},
+	}, "cek desk")
+	if len(ocModelArgs) != 4 || ocModelArgs[0] != "run" || ocModelArgs[1] != "--model" || ocModelArgs[2] != "google/gemini-2.5-flash" || ocModelArgs[3] != "cek desk" {
+		t.Fatalf("unexpected opencode args with model: %#v", ocModelArgs)
+	}
+}

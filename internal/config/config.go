@@ -264,6 +264,15 @@ func (s *Settings) normalize() {
 	if s.Version == 0 {
 		s.Version = 1
 	}
+	haveEng := make(map[string]bool, len(s.Engines))
+	for _, e := range s.Engines {
+		haveEng[e.ID] = true
+	}
+	for _, def := range Default().Engines {
+		if !haveEng[def.ID] {
+			s.Engines = append(s.Engines, def)
+		}
+	}
 	for i := range s.Bots {
 		s.Bots[i].ID = ensureID(s.Bots[i])
 		s.Bots[i].CreatedAt = ensureTime(s.Bots[i])

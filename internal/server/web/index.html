@@ -661,7 +661,14 @@
     }
     const e = state.engines.find(x=>x.id===id);
     dl.innerHTML = "";
-    const map = {claude:"Butuh CLI `claude` (Claude Code) sudah login.", codex:"Butuh CLI `codex` (OpenAI Codex) sudah login.", grok:"Butuh CLI `grok` (xAI) sudah login.", echo:"Demo offline: tidak butuh CLI/key, bagus untuk mencoba UI."};
+    const map = {
+      claude:"Butuh CLI `claude` (Claude Code) sudah login.",
+      codex:"Butuh CLI `codex` (OpenAI Codex) sudah login.",
+      grok:"Butuh CLI `grok` (xAI) sudah login.",
+      "gemini-cli":"Butuh CLI `gemini` (Gemini CLI) sudah login Google (punya tier gratis) atau set GEMINI_API_KEY.",
+      opencode:"Butuh CLI `opencode` (OpenCode CLI) sudah terpasang (mendukung model gratis Zen / provider lokal).",
+      echo:"Demo offline: tidak butuh CLI/key, bagus untuk mencoba UI."
+    };
     $("#engineHint").textContent = (map[id] || (e? e.name : "")) + " Kalau CLI tidak ada, bot menampilkan pesan error yang jelas, bukan crash.";
   }
   $("#engineSel").addEventListener("change", ()=>engineHint(false));
@@ -694,7 +701,8 @@
     if(!f.name.value.trim()){ toast("Nama wajib diisi"); return; }
     const engId = $("#engineSel").value;
     const pv = state.providers.find(x=>x.id===engId);
-    const fallbackModel = pv ? (pv.defaultModel||"") : "sonnet";
+    const cliDefaults = {claude:"sonnet", echo:"demo"};
+    const fallbackModel = pv ? (pv.defaultModel||"") : (cliDefaults[engId]||"");
     const body = {name:f.name.value.trim(), emoji:f.emoji.value||"🤖", avatar:pickedAvatar||"__none__", engine:engId, model:f.model.value.trim()||fallbackModel, personality:f.personality.value, workdir:f.workdir.value.trim()};
     try{
       if(editing){ await api(`/api/bots/${encodeURIComponent(editing.id)}`, {method:"PATCH", body:JSON.stringify(body)}); }
